@@ -1,5 +1,7 @@
 # Virtual PSQA
 
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 **Virtual Patient-Specific Quality Assurance (PSQA) platform for proton pencil beam scanning (PBS) radiotherapy.**
 
 Virtual PSQA combines **FastAPI**, **React / Vite**, and **openMCsquare** to provide comprehensive pre-treatment and per-fraction delivery assurance:
