@@ -92,6 +92,7 @@ def run_qa_job(job_id: int) -> None:
         db.commit()
 
         # If an MCsquare job completes, automatically calculate gamma against TPS
+        # and trigger robustness analysis with DVH predictions
         if job.job_type == "mcSquare":
             try:
                 from services.gamma_analysis import run_gamma_analysis
@@ -99,6 +100,13 @@ def run_qa_job(job_id: int) -> None:
                 run_gamma_analysis(job.plan_id, db)
             except Exception as exc:
                 logger.warning(f"Auto gamma analysis after MCsquare for plan {job.plan_id} failed: {exc}")
+
+            try:
+                from services.dvh_service import calculate_plan_dvh_and_robustness
+                logger.info(f"Auto-running DVH and robustness calculation after MCsquare for plan {job.plan_id}...")
+                calculate_plan_dvh_and_robustness(job.plan_id, db, force_recompute=True)
+            except Exception as exc:
+                logger.warning(f"Auto DVH/robustness calculation for plan {job.plan_id} failed: {exc}")
 
         # GATE_VERDICT_V1 -- every completed job changes the evidence, so
         # re-evaluate the gate and let it own plan.qa_status. This covers jobs

@@ -29,6 +29,8 @@ import type {
   ReuploadFractionRecordResponse,
   ChartCheckCreatePayload,
   ChartCheckSummary,
+  PlanDVHResponse,
+  CalculateDVHRequest,
 } from "../types";
 
 const api = axios.create({
@@ -455,6 +457,31 @@ export const reuploadFractionRecord = (
     .then((r) => r.data);
 };
 
+// ---------------------------------------------------------------------------
+// openMCsquare Robustness & DVH Prediction
+// ---------------------------------------------------------------------------
+
+export const getPlanDVH = (
+  planId: number,
+  params?: {
+    setup_uncertainty_mm?: number;
+    range_uncertainty_pct?: number;
+    num_scenarios?: number;
+  }
+) =>
+  api
+    .get<PlanDVHResponse>(`/results/plan/${planId}/dvh`, { params })
+    .then((r) => r.data);
+
+export const calculatePlanDVH = (
+  planId: number,
+  payload: CalculateDVHRequest
+) =>
+  api
+    .post<PlanDVHResponse>(`/results/plan/${planId}/dvh/calculate`, payload)
+    .then((r) => r.data);
+
 export default api;
+
 
 

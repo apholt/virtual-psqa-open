@@ -67,6 +67,7 @@ import { OIRViewer } from "../components/OIRViewer";
 import { OrthancImportModal } from "../components/OrthancImportModal";
 import { CouchTrackingTrend } from "../components/CouchTrackingTrend";
 import { ChartCheckModal } from "../components/ChartCheckModal";
+import { RobustnessDVHCard } from "../components/RobustnessDVHCard";
 import { C } from "../theme";
 
 
@@ -1163,6 +1164,13 @@ export function PlanDetail() {
                 </table>
               </div>
             </div>
+
+            {/* openMCsquare Robustness Analysis & DVH Predictions */}
+            <RobustnessDVHCard
+              planId={id}
+              hasMCDose={doseInfo?.sources.some((s) => s.source.startsWith("mcSquare")) ?? false}
+              onLaunchMC={() => handleLaunchJob("mcSquare")}
+            />
           </div>
         )}
 

@@ -783,4 +783,69 @@ export interface ChartCheckCreatePayload {
   }>;
 }
 
+// ---------------------------------------------------------------------------
+// openMCsquare Robustness & DVH Prediction Types
+// ---------------------------------------------------------------------------
+
+export interface MetricInterval {
+  tps?: number | null;
+  mc_nominal: number;
+  mc_min: number;
+  mc_max: number;
+  delta_pct?: number | null;
+}
+
+export interface ROIMetrics {
+  d98: MetricInterval;
+  d95: MetricInterval;
+  d50: MetricInterval;
+  d2: MetricInterval;
+  d_mean: MetricInterval;
+  d_max: MetricInterval;
+  d_min: MetricInterval;
+  v100_pct?: MetricInterval | null;
+}
+
+export interface DVHCurve {
+  dose_bins_gy: number[];
+  tps_volume_pct?: number[] | null;
+  mc_nominal_volume_pct: number[];
+  mc_min_volume_pct: number[];
+  mc_max_volume_pct: number[];
+}
+
+export interface ROIDVHData {
+  roi_number: number;
+  name: string;
+  type: string; // TARGET | OAR | EXTERNAL | OTHER
+  color: string;
+  volume_cc: number;
+  is_target: boolean;
+  robustness_pass: boolean;
+  robustness_note?: string | null;
+  metrics: ROIMetrics;
+  dvh: DVHCurve;
+}
+
+export interface PlanDVHResponse {
+  plan_id: number;
+  calculated_at: string;
+  setup_uncertainty_mm: number;
+  range_uncertainty_pct: number;
+  num_scenarios: number;
+  scenario_names: string[];
+  prescription_dose_gy?: number | null;
+  has_mc_dose: boolean;
+  has_tps_dose: boolean;
+  rois: ROIDVHData[];
+}
+
+export interface CalculateDVHRequest {
+  setup_uncertainty_mm?: number;
+  range_uncertainty_pct?: number;
+  num_scenarios?: number;
+  prescription_dose_gy?: number | null;
+}
+
+
 

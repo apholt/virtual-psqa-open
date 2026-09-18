@@ -470,6 +470,16 @@ def main():
     log(f"summed dose ({n_read} beams) max={float(summed.max()):.4f} Gy shape={summed.shape}")
     emit("RESULT_SUMMED", summed_path)
 
+    # Preserve any native openMCsquare DVH outputs from Outputs/
+    outputs_dir = Path(mc2.WorkDir) / "Outputs"
+    if outputs_dir.is_dir():
+        for dvh_file in outputs_dir.glob("DVH_*.txt"):
+            try:
+                shutil.copy(str(dvh_file), str(output_dir / dvh_file.name))
+                log(f"saved native MCsquare DVH: {dvh_file.name}")
+            except Exception as e:
+                log(f"warning copying {dvh_file.name}: {e}")
+
     progress(1.0)
     emit("DONE")
 

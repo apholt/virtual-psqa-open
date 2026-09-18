@@ -277,7 +277,97 @@ def generate_synthetic_rtrecord(
     return ds
 
 
-def write_synthetic_dicom_set(output_dir: str, n_fields: int = 3) -> dict[str, str]:
+def generate_synthetic_rtstruct(
+    rtplan: FileDataset,
+    rtdose: FileDataset,
+) -> FileDataset:
+    """
+    Creates a synthetic RTSTRUCT dataset containing PTV_High, SpinalCord, and External contours.
+    """
+    struct_uid = generate_uid()
+    ds = _base_dataset("1.2.840.10008.5.1.4.1.1.481.3", struct_uid)
+    _fake_patient_tags(ds)
+    ds.PatientID = rtplan.PatientID
+    ds.PatientName = rtplan.PatientName
+
+    ds.Modality = "RTSTRUCT"
+    ds.StructureSetLabel = "SYNTHETIC_STRUCTS"
+    ds.StructureSetName = "Planning Contours"
+    ds.StructureSetDate = ds.StudyDate
+    ds.StructureSetTime = ds.StudyTime
+
+    # Define ROIs
+    rois = [
+        {"num": 1, "name": "PTV_High", "type": "PTV", "color": [220, 40, 40], "radius": 28.0, "offset": (0.0, 0.0)},
+        {"num": 2, "name": "SpinalCord", "type": "ORGAN", "color": [40, 140, 240], "radius": 8.0, "offset": (0.0, -35.0)},
+        {"num": 3, "name": "External", "type": "EXTERNAL", "color": [50, 180, 50], "radius": 75.0, "offset": (0.0, 0.0)},
+    ]
+
+    roi_seq = []
+    obs_seq = []
+    contour_seq = []
+
+    # Get slice Z levels from RTDose
+    n_planes = getattr(rtdose, "NumberOfFrames", 20)
+    grid_offsets = list(getattr(rtdose, "GridFrameOffsetVector", range(n_planes)))
+    ipp = [float(v) for v in getattr(rtdose, "ImagePositionPatient", [0.0, 0.0, 0.0])]
+
+    for r in rois:
+        # StructureSetROISequence item
+        s_item = Dataset()
+        s_item.ROINumber = r["num"]
+        s_item.ReferencedFrameOfReferenceUID = generate_uid()
+        s_item.ROIName = r["name"]
+        s_item.ROIGenerationAlgorithm = "AUTOMATIC"
+        roi_seq.append(s_item)
+
+        # RTROIObservationsSequence item
+        o_item = Dataset()
+        o_item.ObservationNumber = r["num"]
+        o_item.ReferencedROINumber = r["num"]
+        o_item.RTROIInterpretedType = r["type"]
+        o_item.ROIInterpreter = "VirtualPSQA"
+        obs_seq.append(o_item)
+
+        # ROIContourSequence item
+        c_item = Dataset()
+        c_item.ReferencedROINumber = r["num"]
+        c_item.ROIDisplayColor = r["color"]
+
+        slices = []
+        # Draw contour on slices around center
+        mid = n_planes // 2
+        z_start = max(0, mid - 5)
+        z_end = min(n_planes, mid + 6)
+
+        theta = np.linspace(0, 2 * np.pi, 16, endpoint=False)
+        rad = r["radius"]
+        ox, oy = r["offset"]
+
+        for z_idx in range(z_start, z_end):
+            z_coord = ipp[2] + float(grid_offsets[z_idx])
+            pts = []
+            for t in theta:
+                px = ipp[0] + ox + rad * np.cos(t)
+                py = ipp[1] + oy + rad * np.sin(t)
+                pts.extend([round(float(px), 2), round(float(py), 2), round(float(z_coord), 2)])
+
+            sl = Dataset()
+            sl.ContourGeometricType = "CLOSED_PLANAR"
+            sl.NumberOfContourPoints = len(theta)
+            sl.ContourData = pts
+            slices.append(sl)
+
+        c_item.ContourSequence = Sequence(slices)
+        contour_seq.append(c_item)
+
+    ds.StructureSetROISequence = Sequence(roi_seq)
+    ds.RTROIObservationsSequence = Sequence(obs_seq)
+    ds.ROIContourSequence = Sequence(contour_seq)
+    return ds
+
+
+def write_synthetic_dicom_set(output_dir: str, n_fields: int = 3, include_rtstruct: bool = True) -> dict[str, str]:
     """
     Generates a complete set of synthetic DICOM files and writes them to output_dir.
     Returns dict mapping modality → file path.
@@ -287,8 +377,13 @@ def write_synthetic_dicom_set(output_dir: str, n_fields: int = 3) -> dict[str, s
     rtdose = generate_synthetic_rtdose(rtplan)
     rtrecord = generate_synthetic_rtrecord(rtplan)
 
+    items = [(rtplan, "RP"), (rtdose, "RD"), (rtrecord, "RI")]
+    if include_rtstruct:
+        rtstruct = generate_synthetic_rtstruct(rtplan, rtdose)
+        items.append((rtstruct, "RS"))
+
     paths = {}
-    for ds, name in [(rtplan, "RP"), (rtdose, "RD"), (rtrecord, "RI")]:
+    for ds, name in items:
         path = str(Path(output_dir) / f"{name}.{ds.SOPInstanceUID}.dcm")
         pydicom.dcmwrite(path, ds)
         paths[name] = path

@@ -14,6 +14,7 @@ from database import get_db
 from models.gamma_result import GammaResult
 from models.plan import Plan
 from schemas.dose import DoseSourceMeta, PlanDoseInfo
+from schemas.dvh import CalculateDVHRequest, PlanDVHResponse
 from schemas.gamma_result import GammaResultResponse
 from services.gamma_analysis import (
     _comparison_specs,
@@ -214,5 +215,60 @@ async def get_plan_couch_trends(plan_id: int, db: Session = Depends(get_db)):
     """
     from services.fraction_log_analysis import get_plan_couch_trends
     return get_plan_couch_trends(plan_id, db)
+
+
+@router.get("/plan/{plan_id}/dvh", response_model=PlanDVHResponse)
+async def get_plan_dvh(
+    plan_id: int,
+    setup_uncertainty_mm: float = 3.0,
+    range_uncertainty_pct: float = 3.0,
+    num_scenarios: int = 9,
+    db: Session = Depends(get_db),
+):
+    """
+    Returns Dose-Volume Histogram (DVH) predictions and robustness analysis
+    for openMCsquare secondary verification. Loads cached result or computes on-demand.
+    """
+    from services.dvh_service import calculate_plan_dvh_and_robustness
+    try:
+        return calculate_plan_dvh_and_robustness(
+            plan_id,
+            db,
+            setup_uncertainty_mm=setup_uncertainty_mm,
+            range_uncertainty_pct=range_uncertainty_pct,
+            num_scenarios=num_scenarios,
+            force_recompute=False,
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to calculate DVH and robustness: {exc}")
+
+
+@router.post("/plan/{plan_id}/dvh/calculate", response_model=PlanDVHResponse)
+async def calculate_plan_dvh(
+    plan_id: int,
+    req: CalculateDVHRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Recompute DVH and robustness uncertainty scenarios with custom setup and range uncertainty parameters.
+    """
+    from services.dvh_service import calculate_plan_dvh_and_robustness
+    try:
+        return calculate_plan_dvh_and_robustness(
+            plan_id,
+            db,
+            setup_uncertainty_mm=req.setup_uncertainty_mm,
+            range_uncertainty_pct=req.range_uncertainty_pct,
+            num_scenarios=req.num_scenarios,
+            prescription_dose_override=req.prescription_dose_gy,
+            force_recompute=True,
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to recalculate DVH and robustness: {exc}")
+
 
 

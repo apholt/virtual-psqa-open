@@ -23,6 +23,7 @@ import { DoseColorbar } from "../components/DoseColorbar";
 import { DiffColorbar, GammaColorbar } from "../components/PanelLegends";
 import { GammaBar } from "../components/GammaBar";
 import { StatusBadge } from "../components/StatusBadge";
+import { RobustnessDVHCard } from "../components/RobustnessDVHCard";
 
 const SOURCE_LABELS: Record<DoseSource, string> = {
   tps: "TPS (RayStation)",
@@ -593,6 +594,14 @@ export function DoseComparison() {
             </p>
           )}
         </div>
+      </div>
+
+      {/* openMCsquare Robustness Analysis & DVH Predictions */}
+      <div className="w-full px-6 pb-8">
+        <RobustnessDVHCard
+          planId={id}
+          hasMCDose={info.sources.some((s) => s.source.startsWith("mcSquare"))}
+        />
       </div>
     </div>
   );
