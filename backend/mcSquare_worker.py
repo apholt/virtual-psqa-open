@@ -76,6 +76,7 @@ def parse_args():
     p.add_argument("--exe", default="MCsquare_win_avx2.exe", help="MCsquare executable name in install-dir")
     p.add_argument("--ct-dir", default=None, help="override folder containing synthetic CT DICOM series")
     p.add_argument("--dose-prefix", default="mc_dose", help="base filename for output dose npz files")
+    p.add_argument("--plan-uid", default=None, help="target RT Plan SOPInstanceUID")
 
     p.add_argument("--enable-override", action="store_true", help="apply RTStruct water overrides (legacy)")
     p.add_argument("--no-density-override", action="store_true",
@@ -182,7 +183,23 @@ def main():
         sys.exit(2)
     if n_ct > 1:
         log(f"WARNING: {n_ct} CT series present — using the first")
-    if n_plan > 1:
+    if args.plan_uid and len(patient.Plans) > 1:
+        target_plan = None
+        import pydicom
+        for p in patient.Plans:
+            try:
+                d = pydicom.dcmread(p.DcmFile, stop_before_pixels=True)
+                if str(getattr(d, "SOPInstanceUID", "")) == args.plan_uid:
+                    target_plan = p
+                    break
+            except Exception:
+                pass
+        if target_plan is not None:
+            log(f"Matched target plan UID {args.plan_uid}: '{target_plan.PlanName}'")
+            patient.Plans = [target_plan]
+        else:
+            log(f"WARNING: Plan UID {args.plan_uid} not matched among plans; keeping first")
+    elif n_plan > 1:
         log(f"WARNING: {n_plan} plans present — using the first")
 
     # We only need CT (+ struct for density overrides); skip TPS dose loading.

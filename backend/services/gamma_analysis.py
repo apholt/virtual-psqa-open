@@ -110,17 +110,22 @@ _STORE_SCAN_CACHE: dict = {}
 _STORE_SCAN_CACHE_MAX = 32
 
 
-def _scan_store(store: str) -> tuple[Optional[str], dict]:
+def _scan_store(
+    store: str,
+    plan_uid: Optional[str] = None,
+    valid_beams: Optional[set[int]] = None,
+) -> tuple[Optional[str], dict]:
     try:
-        key = (store, Path(store).stat().st_mtime_ns)
+        valid_tuple = tuple(sorted(valid_beams)) if valid_beams else None
+        key = (store, Path(store).stat().st_mtime_ns, plan_uid, valid_tuple)
     except OSError:
-        key = (store, 0)
+        key = (store, 0, plan_uid, None)
     hit = _STORE_SCAN_CACHE.get(key)
     if hit is not None:
         return hit
-    rtdose_path = find_rtdose_file(store)
+    rtdose_path = find_rtdose_file(store, plan_uid=plan_uid)
     try:
-        beam_rtdoses = find_beam_rtdose_files(store) or {}
+        beam_rtdoses = find_beam_rtdose_files(store, plan_uid=plan_uid, valid_beam_numbers=valid_beams) or {}
     except Exception:
         beam_rtdoses = {}
     if len(_STORE_SCAN_CACHE) >= _STORE_SCAN_CACHE_MAX:
@@ -129,18 +134,27 @@ def _scan_store(store: str) -> tuple[Optional[str], dict]:
     return rtdose_path, beam_rtdoses
 
 
-def _beam_names_from_plan(dicom_store_path: str) -> dict[int, str]:
-    """Returns {beam_number: beam_name} from the RT Ion Plan."""
+def _beam_names_from_plan(dicom_store_path: str, plan_uid: Optional[str] = None) -> dict[int, str]:
+    """Returns {beam_number: beam_name} from the RT Ion Plan, filtered by plan_uid if given."""
     beam_names: dict[int, str] = {}
     for path in Path(dicom_store_path).glob("*.dcm"):
         try:
             dcm = pydicom.dcmread(str(path), stop_before_pixels=True)
             if str(dcm.get("Modality", "")).upper() not in ("RTPLAN", "RTIBTR"):
                 continue
+            if plan_uid is not None and str(getattr(dcm, "SOPInstanceUID", "")) != plan_uid:
+                continue
             for beam in getattr(dcm, "IonBeamSequence", []):
                 num = int(getattr(beam, "BeamNumber", 0))
                 name = str(getattr(beam, "BeamName", f"Beam{num}"))
                 beam_names[num] = name
+            if not beam_names:
+                for beam in getattr(dcm, "BeamSequence", []):
+                    num = int(getattr(beam, "BeamNumber", 0))
+                    name = str(getattr(beam, "BeamName", f"Beam{num}"))
+                    beam_names[num] = name
+            if beam_names:
+                break
         except Exception:
             continue
     return beam_names
@@ -302,7 +316,11 @@ def load_plan_doses(plan_id: int, db: Session) -> dict[str, DoseGrid]:
 
     doses: dict[str, DoseGrid] = {}
 
-    rtdose_path, beam_rtdoses = _scan_store(plan.dicom_store_path)
+    valid_beam_names = _beam_names_from_plan(plan.dicom_store_path, plan_uid=plan.rtplan_uid)
+    valid_beams = set(valid_beam_names.keys()) if valid_beam_names else None
+    rtdose_path, beam_rtdoses = _scan_store(
+        plan.dicom_store_path, plan_uid=plan.rtplan_uid, valid_beams=valid_beams
+    )
     if rtdose_path:
         doses["tps"] = cached_load(rtdose_path)
 
@@ -621,13 +639,18 @@ def run_gamma_analysis(
         except Exception as e:
             logger.warning(f"Could not load {npz}: {e}")
 
-    beam_tps_doses = find_beam_rtdose_files(plan.dicom_store_path)
-    beam_names = _beam_names_from_plan(plan.dicom_store_path)
+    beam_names = _beam_names_from_plan(plan.dicom_store_path, plan_uid=plan.rtplan_uid)
+    valid_beams = set(beam_names.keys()) if beam_names else None
+    beam_tps_doses = find_beam_rtdose_files(
+        plan.dicom_store_path, plan_uid=plan.rtplan_uid, valid_beam_numbers=valid_beams
+    )
 
     # Per-beam mode requires a NON-EMPTY intersection of beam numbers. An empty
     # intersection previously produced zero rows and all([]) == True (silent
     # pass) -- now it logs and falls back to the summed comparison instead.
     common_beams = set(beam_mc_doses.keys()) & set((beam_tps_doses or {}).keys())
+    if valid_beams:
+        common_beams = common_beams & valid_beams
     has_per_beam = bool(common_beams)
     if (beam_mc_doses or beam_tps_doses) and not has_per_beam:
         logger.warning(

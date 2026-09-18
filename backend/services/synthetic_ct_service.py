@@ -844,7 +844,7 @@ def calculate_synthetic_ct_dose(
         mc_grid = DoseGrid.load(mc_path)
 
         plan = db.query(Plan).filter_by(id=plan_id).first()
-        rtdose_path = find_rtdose_file(plan.dicom_store_path) if plan else None
+        rtdose_path = find_rtdose_file(plan.dicom_store_path, plan_uid=plan.rtplan_uid) if plan else None
         if not rtdose_path:
             raise FileNotFoundError(f"No reference TPS RTDose found for plan {plan_id}")
 

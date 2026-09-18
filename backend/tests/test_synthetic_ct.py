@@ -128,7 +128,9 @@ def test_imaging_core_unit():
 
 def test_synthetic_ct_full_pipeline():
     settings.MCSQUARE_SIMULATION_MODE = True
-    client = TestClient(app)
+    from services.auth_service import create_session_token
+    token = create_session_token("admin")
+    client = TestClient(app, cookies={settings.AUTH_SESSION_COOKIE: token})
     db = SessionLocal()
     try:
         # 1. Ingest a synthetic plan (includes planning RTDose)

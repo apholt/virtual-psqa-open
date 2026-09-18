@@ -129,7 +129,10 @@ def test_treatment_status_comment_flagged():
 
 def test_reupload_fraction_record_endpoint(tmp_path):
     import uuid
-    client = TestClient(app)
+    from config import settings
+    from services.auth_service import create_session_token
+    token = create_session_token("admin")
+    client = TestClient(app, cookies={settings.AUTH_SESSION_COOKIE: token})
     db = SessionLocal()
     try:
         # Create test patient and plan

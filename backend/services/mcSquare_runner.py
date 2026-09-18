@@ -154,7 +154,7 @@ def _mock_simulate(plan_id: int, output_dir: str, job_id: int, db: Session) -> s
     from services.gamma_analysis import load_rtdose
 
     plan = db.query(Plan).filter_by(id=plan_id).first()
-    rtdose_path = find_rtdose_file(plan.dicom_store_path) if plan else None
+    rtdose_path = find_rtdose_file(plan.dicom_store_path, plan_uid=plan.rtplan_uid) if plan else None
     if not rtdose_path:
         raise FileNotFoundError(
             f"No RTDose found for plan {plan_id} — cannot build mock MC dose."
@@ -270,6 +270,8 @@ def _run_worker(
         "--rbe", str(rbe),
         "--dose-prefix", str(dose_prefix),
     ]
+    if plan.rtplan_uid:
+        cmd.extend(["--plan-uid", str(plan.rtplan_uid)])
     if ct_dir:
         ct_dir_abs = Path(ct_dir)
         if not ct_dir_abs.is_absolute():
@@ -278,6 +280,7 @@ def _run_worker(
 
     logger.info(
         f"Launching MCsquare worker for plan {plan_id} (prefix={dose_prefix}): store={store} "
+        f"{f'plan_uid={plan.rtplan_uid} ' if plan.rtplan_uid else ''}"
         f"{f'ct_dir={ct_dir} ' if ct_dir else ''}bdl={bdl} exe={exe} unc={uncertainty}% rbe={rbe}"
     )
 
@@ -346,7 +349,7 @@ def _mock_simulate_synthetic(
     from services.gamma_analysis import load_rtdose
 
     plan = db.query(Plan).filter_by(id=plan_id).first()
-    rtdose_path = find_rtdose_file(plan.dicom_store_path) if plan else None
+    rtdose_path = find_rtdose_file(plan.dicom_store_path, plan_uid=plan.rtplan_uid) if plan else None
     if not rtdose_path:
         raise FileNotFoundError(
             f"No RTDose found for plan {plan_id} — cannot build mock synthetic CT MC dose."

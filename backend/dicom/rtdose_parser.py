@@ -12,54 +12,116 @@ import pydicom
 from services.dose_grid import DoseGrid
 logger = logging.getLogger(__name__)
 
-def find_rtdose_file(dicom_store_path: str) -> Optional[str]:
+def find_rtdose_file(dicom_store_path: str, plan_uid: Optional[str] = None) -> Optional[str]:
     """
     Scans a plan's dicom_store folder for the RTDOSE file to use as the TPS
     reference dose. Prefers the PLAN-level summed dose (DoseSummationType=PLAN)
-    over field/beam doses. Falls back to the first RTDOSE found if no PLAN-level
-    dose is present.
-    """
-    candidates: list[str] = []
-    plan_dose: Optional[str] = None
+    over field/beam doses.
 
-    for path in Path(dicom_store_path).glob("*.dcm"):
+    If `plan_uid` is provided, filters for RTDose files whose
+    ReferencedRTPlanSequence matches `plan_uid`, preventing cross-contamination
+    when multiple plans or adaptive versions share a patient store.
+    Falls back to unreferenced RTDose only if no matching plan-referenced dose exists.
+    """
+    matching_candidates: list[str] = []
+    matching_plan_dose: Optional[str] = None
+    fallback_candidates: list[str] = []
+    fallback_plan_dose: Optional[str] = None
+
+    for path in sorted(Path(dicom_store_path).glob("*.dcm")):
         try:
-            dcm = pydicom.dcmread(str(path), stop_before_pixels=True)
+            dcm = pydicom.dcmread(str(path), stop_before_pixels=True, force=True)
             if str(dcm.get("Modality", "")).upper() != "RTDOSE":
                 continue
-            candidates.append(str(path))
+
             summary_type = str(dcm.get("DoseSummationType", "")).upper()
-            if summary_type == "PLAN":
-                plan_dose = str(path)
+            ref_plan_uid = None
+            try:
+                ref_seq = getattr(dcm, "ReferencedRTPlanSequence", None)
+                if ref_seq and len(ref_seq) > 0:
+                    ref_plan_uid = str(ref_seq[0].ReferencedSOPInstanceUID)
+            except Exception:
+                pass
+
+            if plan_uid is not None:
+                if ref_plan_uid is not None:
+                    if ref_plan_uid == plan_uid:
+                        matching_candidates.append(str(path))
+                        if summary_type == "PLAN":
+                            matching_plan_dose = str(path)
+                    else:
+                        # Explicitly references a DIFFERENT plan — skip!
+                        logger.debug(
+                            f"Skipping RTDose {path.name}: references plan {ref_plan_uid} != target {plan_uid}"
+                        )
+                        continue
+                else:
+                    fallback_candidates.append(str(path))
+                    if summary_type == "PLAN":
+                        fallback_plan_dose = str(path)
+            else:
+                fallback_candidates.append(str(path))
+                if summary_type == "PLAN":
+                    fallback_plan_dose = str(path)
         except Exception:
             continue
 
-    if plan_dose:
-        logger.info(f"Using PLAN-level RTDose: {plan_dose}")
-        return plan_dose
-    if candidates:
+    if matching_plan_dose:
+        logger.info(f"Using plan-matched PLAN-level RTDose: {matching_plan_dose}")
+        return matching_plan_dose
+    if matching_candidates:
+        logger.info(f"Using plan-matched RTDose: {matching_candidates[0]}")
+        return matching_candidates[0]
+    if fallback_plan_dose:
+        logger.info(f"Using fallback PLAN-level RTDose: {fallback_plan_dose}")
+        return fallback_plan_dose
+    if fallback_candidates:
         logger.warning(
-            f"No PLAN-level RTDose found in {dicom_store_path}; "
-            f"falling back to first RTDose: {candidates[0]}"
+            f"No plan-matched RTDose found in {dicom_store_path}; "
+            f"falling back to first available RTDose: {fallback_candidates[0]}"
         )
-        return candidates[0]
+        return fallback_candidates[0]
     return None
 
 
-def find_beam_rtdose_files(dicom_store_path: str) -> dict[int, str]:
+def find_beam_rtdose_files(
+    dicom_store_path: str,
+    plan_uid: Optional[str] = None,
+    valid_beam_numbers: Optional[set[int] | list[int]] = None,
+) -> dict[int, str]:
     """
     Finds per-beam RTDose files (DoseSummationType=BEAM or BEAM_SESSION).
     Returns {beam_number: file_path} by reading ReferencedBeamNumber from each file.
+
+    If `plan_uid` is provided, skips any RTDOSE referencing a different RTPlan.
+    If `valid_beam_numbers` is provided, skips beam numbers not belonging to the plan.
     """
+    valid_set = set(valid_beam_numbers) if valid_beam_numbers is not None else None
     beam_doses: dict[int, str] = {}
-    for path in Path(dicom_store_path).glob("*.dcm"):
+    for path in sorted(Path(dicom_store_path).glob("*.dcm")):
         try:
-            dcm = pydicom.dcmread(str(path), stop_before_pixels=True)
+            dcm = pydicom.dcmread(str(path), stop_before_pixels=True, force=True)
             if str(dcm.get("Modality", "")).upper() != "RTDOSE":
                 continue
             summary_type = str(dcm.get("DoseSummationType", "")).upper()
             if summary_type not in ("BEAM", "BEAM_SESSION", "FRACTION"):
                 continue
+
+            # Verify referenced plan if provided
+            ref_plan_uid = None
+            try:
+                ref_seq = getattr(dcm, "ReferencedRTPlanSequence", None)
+                if ref_seq and len(ref_seq) > 0:
+                    ref_plan_uid = str(ref_seq[0].ReferencedSOPInstanceUID)
+            except Exception:
+                pass
+
+            if plan_uid is not None and ref_plan_uid is not None and ref_plan_uid != plan_uid:
+                logger.debug(
+                    f"Skipping beam RTDose {path.name}: references plan {ref_plan_uid} != target {plan_uid}"
+                )
+                continue
+
             # Extract the referenced beam number
             beam_num = None
             try:
@@ -69,7 +131,13 @@ def find_beam_rtdose_files(dicom_store_path: str) -> dict[int, str]:
                 beam_num = int(rfb.ReferencedBeamNumber)
             except Exception:
                 pass
+
             if beam_num is not None:
+                if valid_set is not None and beam_num not in valid_set:
+                    logger.debug(
+                        f"Skipping beam RTDose {path.name}: beam {beam_num} not in valid plan beams {valid_set}"
+                    )
+                    continue
                 beam_doses[beam_num] = str(path)
                 logger.info(f"Found BEAM-level RTDose for beam {beam_num}: {path.name}")
         except Exception:
@@ -125,9 +193,9 @@ def load_rtdose(path: str) -> DoseGrid:
     return DoseGrid(array=dose, spacing=spacing, origin=origin)
 
 
-def load_plan_rtdose(dicom_store_path: str) -> DoseGrid:
+def load_plan_rtdose(dicom_store_path: str, plan_uid: Optional[str] = None) -> DoseGrid:
     """Convenience: finds and loads the RTDose for a plan's dicom_store folder."""
-    path = find_rtdose_file(dicom_store_path)
+    path = find_rtdose_file(dicom_store_path, plan_uid=plan_uid)
     if path is None:
         raise FileNotFoundError(f"No RTDOSE file found in {dicom_store_path}")
     return load_rtdose(path)

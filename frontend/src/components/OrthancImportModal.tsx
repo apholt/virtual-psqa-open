@@ -626,7 +626,9 @@ export function OrthancImportModal({
                                   {p.plan_name || p.plan_label}
                                 </span>
                                 <span className="text-[10px] text-clinical-muted">
-                                  {p.number_of_fractions ? `${p.number_of_fractions} Fractions` : "Clinical Plan"}
+                                  {p.number_of_fields ? `${p.number_of_fields} Fields` : ""}
+                                  {p.number_of_fields && p.number_of_fractions ? " · " : ""}
+                                  {p.number_of_fractions ? `${p.number_of_fractions} Fractions` : (!p.number_of_fields ? "Clinical Plan" : "")}
                                 </span>
                               </div>
 

@@ -52,7 +52,7 @@ export const ChartCheckModal: React.FC<ChartCheckModalProps> = ({
       } else {
         setSelectedFractions([1, 2, 3]);
       }
-      setChecklist(data.default_checklist.map((item) => ({ ...item, verified: true })));
+      setChecklist(data.default_checklist.map((item) => ({ ...item, verified: false })));
     } catch (err) {
       toast.error("Failed to load chart check history.");
     } finally {

@@ -203,6 +203,73 @@ def search_orthanc_patients(
 # Patient Details & Series Discovery
 # ---------------------------------------------------------------------------
 
+def _extract_referenced_plan_uids(tags: dict[str, Any]) -> list[str]:
+    """
+    Extract all ReferencedSOPInstanceUIDs from ReferencedRTPlanSequence in DICOM tags
+    (supports both Orthanc simplified-tags format and pydicom dictionary representation).
+    """
+    uids: list[str] = []
+    if not tags:
+        return uids
+    seq = tags.get("ReferencedRTPlanSequence")
+    if not seq:
+        return uids
+    if isinstance(seq, dict):
+        seq = [seq]
+    if isinstance(seq, list):
+        for item in seq:
+            if isinstance(item, dict):
+                ref_uid = item.get("ReferencedSOPInstanceUID")
+                if ref_uid:
+                    uids.append(str(ref_uid).strip())
+            elif isinstance(item, str):
+                uids.append(item.strip())
+    return uids
+
+
+def _score_dose_candidate(
+    s: dict[str, Any],
+    target_plan_sop: str,
+    target_plan_label: str,
+    target_study_id: str,
+) -> float:
+    """
+    Score an RTDOSE series for pairing with a target RTPLAN.
+    Returns:
+      > 0: suitable candidate (higher score is better)
+      < 0: strictly disqualified (e.g. references a different RTPLAN UID)
+    """
+    extra = s.get("extra", {}) or {}
+    ref_uids = _extract_referenced_plan_uids(extra)
+
+    # 1. Strict UID verification: if the dose references an RTPlan, verify match
+    if ref_uids:
+        if target_plan_sop and target_plan_sop in ref_uids:
+            return 1000.0  # Exact UID match!
+        else:
+            # References a DIFFERENT plan (e.g. initial plan instead of adaptive plan)
+            return -10000.0  # Strict disqualification!
+
+    # 2. Heuristic scoring if ReferencedRTPlanSequence is absent/unpopulated in header
+    score = 0.0
+    if s.get("study_id") == target_study_id:
+        score += 50.0
+
+    desc = str(s.get("series_description", "")).lower()
+    lbl = str(target_plan_label or "").lower()
+
+    if lbl and len(lbl) > 2 and (lbl in desc or desc in lbl):
+        score += 30.0
+
+    summation = str(extra.get("DoseSummationType", "")).upper()
+    if summation == "PLAN":
+        score += 20.0
+    elif summation in ("BEAM", "BEAM_SESSION"):
+        score -= 10.0  # Prefer total plan dose over individual beam doses
+
+    return score
+
+
 def get_orthanc_patient_details(
     patient_orthanc_id: str,
     db: Optional[Session] = None,
@@ -321,10 +388,28 @@ def get_orthanc_patient_details(
                 except (TypeError, ValueError):
                     pass
 
-            # Match RTDOSE, RTSTRUCT, Planning CT in same study
-            study_series = [s for s in all_series if s["study_id"] == ps["study_id"]]
+            # Number of fields from IonBeamSequence or BeamSequence
+            n_fields: Optional[int] = None
+            beam_seq = p_extra.get("IonBeamSequence") or p_extra.get("BeamSequence") or []
+            if isinstance(beam_seq, list) and len(beam_seq) > 0:
+                treatment_beams = [
+                    b for b in beam_seq
+                    if isinstance(b, dict) and str(b.get("TreatmentDeliveryType", "")).upper() != "SETUP"
+                ]
+                n_fields = len(treatment_beams) if treatment_beams else len(beam_seq)
 
-            dose_cand = [s for s in study_series if s["modality"] == "RTDOSE"]
+            # Match RTDOSE by scoring all RTDOSE series to find the best match for THIS specific plan
+            all_dose_series = [s for s in all_series if s["modality"] == "RTDOSE"]
+            scored_doses = []
+            for ds in all_dose_series:
+                sc = _score_dose_candidate(ds, plan_sop, plan_label, ps["study_id"])
+                if sc > 0:
+                    scored_doses.append((sc, ds))
+            scored_doses.sort(key=lambda item: item[0], reverse=True)
+            matched_dose = scored_doses[0][1] if scored_doses else None
+
+            # Match RTSTRUCT, Planning CT in same study
+            study_series = [s for s in all_series if s["study_id"] == ps["study_id"]]
             struct_cand = [s for s in study_series if s["modality"] == "RTSTRUCT"]
             ct_cand = [s for s in study_series if s["modality"] == "CT" and not ("cbct" in s["series_description"].lower())]
             if not ct_cand:
@@ -352,8 +437,9 @@ def get_orthanc_patient_details(
                 "study_date": ps["study_date"],
                 "series_date": ps["series_date"],
                 "number_of_fractions": n_fractions,
-                "dose_series_id": dose_cand[0]["series_id"] if dose_cand else None,
-                "dose_series_description": dose_cand[0]["series_description"] if dose_cand else None,
+                "number_of_fields": n_fields,
+                "dose_series_id": matched_dose["series_id"] if matched_dose else None,
+                "dose_series_description": matched_dose["series_description"] if matched_dose else None,
                 "struct_series_id": struct_cand[0]["series_id"] if struct_cand else None,
                 "struct_series_description": struct_cand[0]["series_description"] if struct_cand else None,
                 "planning_ct_series_id": ct_cand[0]["series_id"] if ct_cand else None,
@@ -521,9 +607,65 @@ def import_plan_from_orthanc(
                     logger.error(f"Error extracting archive for series {sid}: {exc}")
                     raise ValueError(f"Failed to extract DICOM files for series {sid}: {exc}")
 
+        # Identify the target RTPlan SOPInstanceUID from s0_ (the plan series)
+        target_plan_sop: Optional[str] = None
+        for dcm_file in tmp_path.glob("s0_*"):
+            if not dcm_file.is_file():
+                continue
+            try:
+                dcm = pydicom.dcmread(str(dcm_file), stop_before_pixels=True, force=True)
+                if str(dcm.get("Modality", "")).upper() in ("RTPLAN", "RTIBTR"):
+                    target_plan_sop = str(getattr(dcm, "SOPInstanceUID", ""))
+                    if target_plan_sop:
+                        break
+            except Exception:
+                pass
+
+        # Fallback: scan all extracted files for any RTPlan
+        if not target_plan_sop:
+            for dcm_file in tmp_path.glob("*"):
+                if not dcm_file.is_file():
+                    continue
+                try:
+                    dcm = pydicom.dcmread(str(dcm_file), stop_before_pixels=True, force=True)
+                    if str(dcm.get("Modality", "")).upper() in ("RTPLAN", "RTIBTR"):
+                        target_plan_sop = str(getattr(dcm, "SOPInstanceUID", ""))
+                        if target_plan_sop:
+                            break
+                except Exception:
+                    pass
+
+        # Protect against cross-plan contamination:
+        # Remove foreign RTPLAN or foreign RTDOSE files that point to another plan
+        if target_plan_sop:
+            for dcm_file in list(tmp_path.glob("*")):
+                if not dcm_file.is_file():
+                    continue
+                try:
+                    dcm = pydicom.dcmread(str(dcm_file), stop_before_pixels=True, force=True)
+                    mod = str(dcm.get("Modality", "")).upper()
+                    if mod in ("RTPLAN", "RTIBTR"):
+                        file_sop = str(getattr(dcm, "SOPInstanceUID", ""))
+                        if file_sop and file_sop != target_plan_sop:
+                            logger.warning(
+                                f"Removing foreign RTPLAN {dcm_file.name} (UID {file_sop}) from download; target is {target_plan_sop}"
+                            )
+                            dcm_file.unlink()
+                    elif mod == "RTDOSE":
+                        ref_seq = getattr(dcm, "ReferencedRTPlanSequence", None)
+                        if ref_seq and len(ref_seq) > 0:
+                            ref_sop = str(ref_seq[0].ReferencedSOPInstanceUID)
+                            if ref_sop and ref_sop != target_plan_sop:
+                                logger.warning(
+                                    f"Discarding foreign RTDOSE {dcm_file.name} referencing plan {ref_sop} (target plan is {target_plan_sop})"
+                                )
+                                dcm_file.unlink()
+                except Exception as exc:
+                    logger.debug(f"Could not inspect file {dcm_file.name} during cleanup: {exc}")
+
         # Ingest the extracted directory into Virtual-PSQA
         try:
-            result = ingest_dicom_directory(str(tmp_path), db)
+            result = ingest_dicom_directory(str(tmp_path), db, target_plan_uid=target_plan_sop)
         except Exception as exc:
             logger.error(f"Failed to ingest downloaded DICOM files from Orthanc: {exc}", exc_info=True)
             raise ValueError(f"Ingestion failed: {exc}")

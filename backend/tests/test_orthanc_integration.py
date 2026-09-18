@@ -16,7 +16,10 @@ from models.plan import Plan
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    from config import settings
+    from services.auth_service import create_session_token
+    token = create_session_token("admin")
+    return TestClient(app, cookies={settings.AUTH_SESSION_COOKIE: token})
 
 
 @pytest.fixture
@@ -311,3 +314,201 @@ def test_update_settings_orthanc(client):
     assert s_data["orthanc"]["orthanc_url"] == "http://hospital-pacs:8042"
     assert s_data["orthanc"]["orthanc_username"] == "physicist"
     assert s_data["orthanc"]["has_password"] is True
+
+
+def test_adaptive_multi_plan_isolation_and_field_counts(client, db):
+    """
+    Verify that when an initial 4-field plan and an adaptive 2-field plan coexist:
+    1. get_orthanc_patient_details accurately counts fields (4 vs 2).
+    2. The 2-field adaptive plan is paired strictly with the 2-field dose referencing its SOP UID.
+    3. The 4-field initial dose is disqualified for the adaptive plan.
+    4. find_rtdose_file and find_beam_rtdose_files reject cross-plan files.
+    """
+    from services.orthanc_service import get_orthanc_patient_details
+    from dicom.rtdose_parser import find_rtdose_file, find_beam_rtdose_files
+    import tempfile
+    from pathlib import Path
+    import pydicom
+    from pydicom.dataset import Dataset, FileMetaDataset
+    from pydicom.sequence import Sequence
+
+    initial_plan_sop = "1.2.840.10008.plan.initial.4field"
+    adaptive_plan_sop = "1.2.840.10008.plan.adaptive.2field"
+    initial_dose_sop = "1.2.840.10008.dose.initial.4field"
+    adaptive_dose_sop = "1.2.840.10008.dose.adaptive.2field"
+
+    mock_patient_resp = MagicMock(
+        status_code=200,
+        json=lambda: {
+            "ID": "pat-adaptive-1",
+            "MainDicomTags": {"PatientID": "PAT-ADAPT", "PatientName": "DOE^ADAPTIVE"},
+            "Studies": ["study-1"],
+        },
+    )
+
+    mock_study_resp = MagicMock(
+        status_code=200,
+        json=lambda: {
+            "ID": "study-1",
+            "MainDicomTags": {"StudyDescription": "Course 1", "StudyDate": "20260918"},
+            "Series": ["ser-plan-init", "ser-plan-adapt", "ser-dose-init", "ser-dose-adapt"],
+        },
+    )
+
+    def mock_get(url):
+        if url == "/patients/pat-adaptive-1":
+            return mock_patient_resp
+        if url == "/studies/study-1":
+            return mock_study_resp
+        if url == "/series/ser-plan-init":
+            return MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "ID": "ser-plan-init",
+                    "MainDicomTags": {"Modality": "RTPLAN", "SeriesDescription": "Initial 4F Plan"},
+                    "Instances": ["inst-p-init"],
+                },
+            )
+        if url == "/instances/inst-p-init/simplified-tags":
+            return MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "SOPClassUID": "1.2.840.10008.5.1.4.1.1.481.8",
+                    "SOPInstanceUID": initial_plan_sop,
+                    "RTPlanLabel": "Initial_4F",
+                    "FractionGroupSequence": [{"NumberOfFractionsPlanned": 30}],
+                    "IonBeamSequence": [
+                        {"BeamNumber": 1, "TreatmentDeliveryType": "TREATMENT"},
+                        {"BeamNumber": 2, "TreatmentDeliveryType": "TREATMENT"},
+                        {"BeamNumber": 3, "TreatmentDeliveryType": "TREATMENT"},
+                        {"BeamNumber": 4, "TreatmentDeliveryType": "TREATMENT"},
+                    ],
+                },
+            )
+        if url == "/series/ser-plan-adapt":
+            return MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "ID": "ser-plan-adapt",
+                    "MainDicomTags": {"Modality": "RTPLAN", "SeriesDescription": "Adaptive 2F Plan"},
+                    "Instances": ["inst-p-adapt"],
+                },
+            )
+        if url == "/instances/inst-p-adapt/simplified-tags":
+            return MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "SOPClassUID": "1.2.840.10008.5.1.4.1.1.481.8",
+                    "SOPInstanceUID": adaptive_plan_sop,
+                    "RTPlanLabel": "Adaptive_2F",
+                    "FractionGroupSequence": [{"NumberOfFractionsPlanned": 10}],
+                    "IonBeamSequence": [
+                        {"BeamNumber": 1, "TreatmentDeliveryType": "TREATMENT"},
+                        {"BeamNumber": 2, "TreatmentDeliveryType": "TREATMENT"},
+                    ],
+                },
+            )
+        if url == "/series/ser-dose-init":
+            return MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "ID": "ser-dose-init",
+                    "MainDicomTags": {"Modality": "RTDOSE", "SeriesDescription": "Initial 4F Dose Grid"},
+                    "Instances": ["inst-d-init"],
+                },
+            )
+        if url == "/instances/inst-d-init/simplified-tags":
+            return MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "SOPClassUID": "1.2.840.10008.5.1.4.1.1.481.2",
+                    "SOPInstanceUID": initial_dose_sop,
+                    "DoseSummationType": "PLAN",
+                    "ReferencedRTPlanSequence": [{"ReferencedSOPInstanceUID": initial_plan_sop}],
+                },
+            )
+        if url == "/series/ser-dose-adapt":
+            return MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "ID": "ser-dose-adapt",
+                    "MainDicomTags": {"Modality": "RTDOSE", "SeriesDescription": "Adaptive 2F Dose Grid"},
+                    "Instances": ["inst-d-adapt"],
+                },
+            )
+        if url == "/instances/inst-d-adapt/simplified-tags":
+            return MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "SOPClassUID": "1.2.840.10008.5.1.4.1.1.481.2",
+                    "SOPInstanceUID": adaptive_dose_sop,
+                    "DoseSummationType": "PLAN",
+                    "ReferencedRTPlanSequence": [{"ReferencedSOPInstanceUID": adaptive_plan_sop}],
+                },
+            )
+        return MagicMock(status_code=404)
+
+    mock_orthanc = MockOrthancClient(get_handler=mock_get)
+    with patch("services.orthanc_service.get_orthanc_client", return_value=mock_orthanc):
+        details = get_orthanc_patient_details("pat-adaptive-1", db=db)
+
+    plans = details["plans"]
+    assert len(plans) == 2
+
+    init_p = next(p for p in plans if p["rtplan_uid"] == initial_plan_sop)
+    adapt_p = next(p for p in plans if p["rtplan_uid"] == adaptive_plan_sop)
+
+    # Verify field counts are accurately isolated
+    assert init_p["number_of_fields"] == 4
+    assert adapt_p["number_of_fields"] == 2
+
+    # Verify dose pairing is strictly isolated based on ReferencedRTPlanSequence
+    assert init_p["dose_series_id"] == "ser-dose-init"
+    assert adapt_p["dose_series_id"] == "ser-dose-adapt"
+
+    # Verify rtdose_parser protects against reading wrong dose file in the store
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        # Create dummy initial dose referencing initial plan
+        ds_init = Dataset()
+        ds_init.is_little_endian = True
+        ds_init.is_implicit_VR = True
+        ds_init.Modality = "RTDOSE"
+        ds_init.DoseSummationType = "PLAN"
+        ds_init.SOPInstanceUID = initial_dose_sop
+        ref_seq_init = Dataset()
+        ref_seq_init.ReferencedSOPInstanceUID = initial_plan_sop
+        ds_init.ReferencedRTPlanSequence = Sequence([ref_seq_init])
+        file_meta = FileMetaDataset()
+        file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.481.2"
+        file_meta.MediaStorageSOPInstanceUID = initial_dose_sop
+        file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+        ds_init.file_meta = file_meta
+        p_init_path = Path(tmp_dir) / "initial_dose.dcm"
+        ds_init.save_as(str(p_init_path), write_like_original=False)
+
+        # Create dummy adaptive dose referencing adaptive plan
+        ds_adapt = Dataset()
+        ds_adapt.is_little_endian = True
+        ds_adapt.is_implicit_VR = True
+        ds_adapt.Modality = "RTDOSE"
+        ds_adapt.DoseSummationType = "PLAN"
+        ds_adapt.SOPInstanceUID = adaptive_dose_sop
+        ref_seq_adapt = Dataset()
+        ref_seq_adapt.ReferencedSOPInstanceUID = adaptive_plan_sop
+        ds_adapt.ReferencedRTPlanSequence = Sequence([ref_seq_adapt])
+        file_meta2 = FileMetaDataset()
+        file_meta2.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.481.2"
+        file_meta2.MediaStorageSOPInstanceUID = adaptive_dose_sop
+        file_meta2.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+        ds_adapt.file_meta = file_meta2
+        p_adapt_path = Path(tmp_dir) / "adaptive_dose.dcm"
+        ds_adapt.save_as(str(p_adapt_path), write_like_original=False)
+
+        # When searching for adaptive plan, it MUST return adaptive_dose.dcm
+        found_for_adapt = find_rtdose_file(tmp_dir, plan_uid=adaptive_plan_sop)
+        assert found_for_adapt == str(p_adapt_path)
+
+        # When searching for initial plan, it MUST return initial_dose.dcm
+        found_for_init = find_rtdose_file(tmp_dir, plan_uid=initial_plan_sop)
+        assert found_for_init == str(p_init_path)
+

@@ -633,6 +633,7 @@ export interface OrthancPlanItem {
   study_date: string;
   series_date: string;
   number_of_fractions?: number | null;
+  number_of_fields?: number | null;
   dose_series_id?: string | null;
   dose_series_description?: string | null;
   struct_series_id?: string | null;

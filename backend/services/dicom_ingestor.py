@@ -249,12 +249,38 @@ def validate_dicom_set(classified: dict, rtplan_dcm: Optional[pydicom.Dataset] =
 def archive_ingested_files(source_folder: str, patient_id: str, plan_uid: str) -> str:
     """
     Moves DICOM files from the watch/upload folder into the organised dicom_store.
+    Filters out foreign RTPLAN or RTDOSE files that belong to a different plan UID
+    to prevent cross-plan contamination when multi-plan/adaptive datasets are ingested.
     Returns the destination path.
     """
     dest = Path(settings.DICOM_STORE_PATH) / patient_id / plan_uid
     dest.mkdir(parents=True, exist_ok=True)
     for f in Path(source_folder).rglob("*"):
         if f.is_file():
+            # Check if this file is a foreign plan or dose before archiving
+            try:
+                dcm = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
+                mod = str(dcm.get("Modality", "")).upper()
+                sop = str(getattr(dcm, "SOPInstanceUID", ""))
+
+                if mod in ("RTPLAN", "RTIBTR") and sop and sop != plan_uid:
+                    logger.warning(
+                        f"Skipping archive of foreign RTPLAN {f.name} (UID {sop}); target plan is {plan_uid}"
+                    )
+                    continue
+
+                if mod == "RTDOSE":
+                    ref_seq = getattr(dcm, "ReferencedRTPlanSequence", None)
+                    if ref_seq and len(ref_seq) > 0:
+                        ref_plan_uid = str(ref_seq[0].ReferencedSOPInstanceUID)
+                        if ref_plan_uid and ref_plan_uid != plan_uid:
+                            logger.warning(
+                                f"Skipping archive of foreign RTDOSE {f.name} referencing {ref_plan_uid}; target plan is {plan_uid}"
+                            )
+                            continue
+            except Exception:
+                pass
+
             target = dest / f.name
             if f.resolve() != target.resolve():
                 shutil.move(str(f), target)
@@ -396,17 +422,19 @@ def ingest_rtrecord_files(record_paths: list[str], db: Session) -> dict:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def ingest_dicom_directory(upload_path: str, db: Session) -> dict:
+def ingest_dicom_directory(upload_path: str, db: Session, target_plan_uid: Optional[str] = None) -> dict:
     """
     Main entry point. Scans directory, classifies files, upserts Patient + Plan
     DB records, archives files, returns ingestion summary dict.
     Supports RTPlan/RTIonPlan datasets as well as standalone or companion RTRecords.
+    If target_plan_uid is provided, prioritizes ingesting the specific plan and its
+    corresponding RTDose, ignoring foreign plans/doses in the same directory.
     """
     classified = classify_dicom_files(upload_path)
     if not classified:
         raise ValueError(f"No readable DICOM files found in: {upload_path}")
 
-    # Pick the first RTPlan/RTIonPlan file
+    # Pick the RTPlan/RTIonPlan file (match target_plan_uid if provided)
     plan_paths = classified.get("RTPLAN", []) or classified.get("RTIBTR", [])
     record_paths = classified.get("RTRECORD", [])
 
@@ -415,10 +443,20 @@ def ingest_dicom_directory(upload_path: str, db: Session) -> dict:
             return ingest_rtrecord_files(record_paths, db)
         raise ValueError("No RTPlan or RTIonPlan file found — cannot ingest.")
 
-    rtplan_dcm = pydicom.dcmread(plan_paths[0], stop_before_pixels=True)
+    selected_plan_path = plan_paths[0]
+    if target_plan_uid:
+        for pp in plan_paths:
+            try:
+                pdcm = pydicom.dcmread(pp, stop_before_pixels=True)
+                if str(getattr(pdcm, "SOPInstanceUID", "")) == target_plan_uid:
+                    selected_plan_path = pp
+                    break
+            except Exception:
+                pass
+
+    rtplan_dcm = pydicom.dcmread(selected_plan_path, stop_before_pixels=True)
     patient_info = extract_patient_info(rtplan_dcm)
     fields = parse_rtplan_fields(rtplan_dcm)
-    warnings_list = validate_dicom_set(classified, rtplan_dcm)
 
     plan_label = str(rtplan_dcm.get("RTPlanLabel", "") or "")
     plan_name = str(rtplan_dcm.get("RTPlanName", "") or plan_label)
@@ -431,15 +469,46 @@ def ingest_dicom_directory(upload_path: str, db: Session) -> dict:
         except (IndexError, AttributeError, TypeError, ValueError):
             pass
 
-    # RTDose UID
+    # RTDose UID — match target plan_uid and prefer PLAN-level dose
     rtdose_uid = None
     dose_paths = classified.get("RTDOSE", [])
-    if dose_paths:
+    valid_dose_paths: list[str] = []
+    preferred_dose_uid: Optional[str] = None
+
+    for dp in dose_paths:
         try:
-            ddcm = pydicom.dcmread(dose_paths[0], stop_before_pixels=True)
-            rtdose_uid = str(ddcm.get("SOPInstanceUID", "") or "")
+            ddcm = pydicom.dcmread(dp, stop_before_pixels=True)
+            ref_seq = getattr(ddcm, "ReferencedRTPlanSequence", None)
+            ref_uid = str(ref_seq[0].ReferencedSOPInstanceUID) if ref_seq and len(ref_seq) > 0 else None
+            sum_type = str(ddcm.get("DoseSummationType", "")).upper()
+            d_uid = str(ddcm.get("SOPInstanceUID", "") or "")
+
+            if ref_uid:
+                if ref_uid == plan_uid:
+                    valid_dose_paths.append(dp)
+                    if sum_type == "PLAN" and preferred_dose_uid is None:
+                        preferred_dose_uid = d_uid
+                    elif preferred_dose_uid is None and not rtdose_uid:
+                        rtdose_uid = d_uid
+                else:
+                    logger.debug(f"Ingest ignoring foreign RTDOSE {dp} referencing plan {ref_uid} (target {plan_uid})")
+            else:
+                valid_dose_paths.append(dp)
+                if sum_type == "PLAN" and preferred_dose_uid is None:
+                    preferred_dose_uid = d_uid
+                elif preferred_dose_uid is None and not rtdose_uid:
+                    rtdose_uid = d_uid
         except Exception:
             pass
+
+    if preferred_dose_uid:
+        rtdose_uid = preferred_dose_uid
+
+    # Update classified RTDOSE paths to only include valid/matched doses for validation
+    if valid_dose_paths:
+        classified["RTDOSE"] = valid_dose_paths
+
+    warnings_list = validate_dicom_set(classified, rtplan_dcm)
 
     # RTStruct UID
     rtstruct_uid = None
@@ -501,7 +570,13 @@ def ingest_dicom_directory(upload_path: str, db: Session) -> dict:
     if record_paths:
         for rec_path in record_paths:
             try:
-                rec_dcm = pydicom.dcmread(rec_path, stop_before_pixels=True, force=True)
+                rec_file = Path(rec_path)
+                if not rec_file.exists():
+                    # It was moved into dest_path by archive_ingested_files
+                    rec_file = Path(dest_path) / rec_file.name
+                if not rec_file.exists():
+                    continue
+                rec_dcm = pydicom.dcmread(str(rec_file), stop_before_pixels=True, force=True)
                 deliv_type = record_delivery_type(rec_dcm)
                 fx_num = 0 if deliv_type == "verification" else (record_fraction_number(rec_dcm) or 1)
                 sop_uid = str(rec_dcm.get("SOPInstanceUID", "") or "")
@@ -511,8 +586,8 @@ def ingest_dicom_directory(upload_path: str, db: Session) -> dict:
                 else:
                     dest_filename = f"RTRecord_fx{fx_num}_{uid_suffix}.dcm"
                 dest = Path(dest_path) / dest_filename
-                if Path(rec_path).resolve() != dest.resolve():
-                    shutil.copy2(rec_path, dest)
+                if rec_file.resolve() != dest.resolve():
+                    shutil.copy2(str(rec_file), dest)
 
                 frac = (
                     db.query(Fraction)

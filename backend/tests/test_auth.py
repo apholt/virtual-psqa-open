@@ -18,6 +18,11 @@ from services.auth_service import create_session_token, verify_session_token
 
 def test_hipaa_security_safeguards():
     db = SessionLocal()
+    from services.auth_service import create_user
+    u = db.query(User).filter_by(username="jdoe").first()
+    if not u:
+        create_user(db, username="jdoe", password="SecretPass123!", full_name="John Doe", role="physicist")
+
     unauth_client = TestClient(main.app, follow_redirects=False)
 
     # 1. Transmission / Access Control: Unauthenticated request redirects to /login
