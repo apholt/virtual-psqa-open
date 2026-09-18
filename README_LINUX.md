@@ -296,6 +296,13 @@ journalctl -u virtual-psqa -f
 
 ---
 
+## Authors & Primary Contributors
+
+* **Aaron Hutchins** ([ahutchins@tnonc.com](mailto:ahutchins@tnonc.com)) — **Lead Developer & System Architect**
+* **Adam Holt** ([sebaldus.adam@gmail.com](mailto:sebaldus.adam@gmail.com) / [@apholt](https://github.com/apholt)) — **Contributor**
+
+---
+
 ## Citations & Open-Source Acknowledgments
 
 Virtual PSQA utilizes several foundational open-source medical physics projects and scientific packages, including **openMCsquare**, **Orthanc**, **SimpleITK**, and **pydicom**. Please refer to [**`CITATIONS.md`**](CITATIONS.md) for full academic citations and BibTeX records.

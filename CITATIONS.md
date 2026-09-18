@@ -6,7 +6,20 @@ If you use Virtual PSQA in your research, clinical studies, or institutional pre
 
 ---
 
-## 1. Core Medical Physics & Imaging Software
+## 1. Project Authorship & Primary Development
+
+* **Lead Developer & System Architect:** **Aaron Hutchins** ([ahutchins@tnonc.com](mailto:ahutchins@tnonc.com), Tennessee Oncology / Provision CARES Proton Therapy Center)  
+  *Principal author and architect who conceived, designed, and developed the core Virtual PSQA codebase, DICOM ingestion engine, openMCsquare simulation pipelines, fractional delivery log reconstruction, and clinical QA decision engine.*
+* **Contributor:** **Adam Holt** ([sebaldus.adam@gmail.com](mailto:sebaldus.adam@gmail.com) / GitHub: [`@apholt`](https://github.com/apholt))  
+  *Codebase polish, quality-of-life enhancements, openMCsquare scenario robustness analysis, DVH prediction module, and open-source release preparation.*
+
+### Suggested Platform Citation
+If referencing or citing the Virtual PSQA platform in publications or presentations:
+> Hutchins, A. & Holt, A. *Virtual PSQA: Independent Monte Carlo Secondary Dose Calculation and Fractional Delivery Verification Platform for Proton Pencil Beam Scanning Radiotherapy.* Tennessee Oncology, 2026. [https://github.com/apholt/virtual-psqa-open](https://github.com/apholt/virtual-psqa-open)
+
+---
+
+## 2. Core Medical Physics & Imaging Software
 
 ### openMCsquare
 *Fast Monte Carlo dose calculation engine for proton therapy.*
@@ -39,7 +52,7 @@ If you use Virtual PSQA in your research, clinical studies, or institutional pre
 
 ---
 
-## 2. Scientific Algorithms & Methods
+## 3. Scientific Algorithms & Methods
 
 ### Fast 2D & 3D Gamma Evaluation
 *Vectorized local-search algorithm implemented in Virtual PSQA's `gamma_engine`.*
@@ -67,7 +80,7 @@ If you use Virtual PSQA in your research, clinical studies, or institutional pre
 
 ---
 
-## 3. AAPM Clinical Quality Assurance Consensus Reports
+## 4. AAPM Clinical Quality Assurance Consensus Reports
 
 * **AAPM Task Group 218:**  
   Miften M, Olch A, Mihailidis D, et al. *Tolerance limits and methodologies for IMRT measurement-based verification QA: Recommendations of AAPM Task Group No. 218.* **Medical Physics**, 2018; 45(4):e53–e83. doi:[10.1002/mp.12810](https://doi.org/10.1002/mp.12810).
@@ -80,7 +93,7 @@ If you use Virtual PSQA in your research, clinical studies, or institutional pre
 
 ---
 
-## 4. Scientific Python Stack
+## 5. Scientific Python Stack
 
 * **NumPy:** Harris CR, Millman KJ, van der Walt SJ, et al. *Array programming with NumPy.* **Nature**, 2020; 585:357–362. doi:[10.1038/s41586-020-2649-2](https://doi.org/10.1038/s41586-020-2649-2).
 * **SciPy:** Virtanen P, Gommers R, Oliphant TE, et al. *SciPy 1.0: Fundamental Algorithms for Scientific Computing in Python.* **Nature Methods**, 2020; 17:261–272. doi:[10.1038/s41592-019-0686-2](https://doi.org/10.1038/s41592-019-0686-2).
@@ -89,9 +102,17 @@ If you use Virtual PSQA in your research, clinical studies, or institutional pre
 
 ---
 
-## 5. BibTeX Entries
+## 6. BibTeX Entries
 
 ```bibtex
+@misc{hutchins2026virtualpsqa,
+  title={{Virtual PSQA}: Independent {Monte Carlo} Secondary Dose Calculation and Fractional Delivery Verification Platform for Proton Pencil Beam Scanning Radiotherapy},
+  author={Hutchins, Aaron and Holt, Adam},
+  year={2026},
+  howpublished={\url{https://github.com/apholt/virtual-psqa-open}},
+  note={Tennessee Oncology / Provision CARES Proton Therapy Center}
+}
+
 @article{souris2016fast,
   title={Fast {Monte Carlo} dose calculation for proton beam therapy using open{MCsquare}},
   author={Souris, K{\'e}vin and Lee, John A and Sterpin, Edmond},
