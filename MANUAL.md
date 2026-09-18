@@ -11,7 +11,7 @@
 > **Audience:** the medical physicist / administrator running the app on a clinic
 > Windows workstation.
 >
-> **Authorship & Credits:** Developed by **Aaron Hutchins** (`ahutchins@tnonc.com`, Lead Developer & Architect) with contributions, feature polish, and open-source distribution by **Adam Holt** (`apholt`).
+> **Authorship & Credits:** Developed by **Aaron Hutchins** (`ahutchins180@gmail.com`, Lead Developer & Architect) with contributions, feature polish, and open-source distribution by **Adam Holt** (`apholt`).
 
 ---
 

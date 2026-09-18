@@ -127,7 +127,7 @@ Start-Service VirtualPSQA
 
 ## Authors & Primary Contributors
 
-* **Aaron Hutchins** ([ahutchins@tnonc.com](mailto:ahutchins@tnonc.com)) — **Lead Developer & System Architect**
+* **Aaron Hutchins** ([ahutchins180@gmail.com](mailto:ahutchins180@gmail.com)) — **Lead Developer & System Architect**
 * **Adam Holt** ([sebaldus.adam@gmail.com](mailto:sebaldus.adam@gmail.com) / [@apholt](https://github.com/apholt)) — **Contributor**
 
 For complete scientific citations and references, please see [`CITATIONS.md`](CITATIONS.md).

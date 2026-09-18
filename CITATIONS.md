@@ -8,14 +8,14 @@ If you use Virtual PSQA in your research, clinical studies, or institutional pre
 
 ## 1. Project Authorship & Primary Development
 
-* **Lead Developer & System Architect:** **Aaron Hutchins** ([ahutchins@tnonc.com](mailto:ahutchins@tnonc.com), Tennessee Oncology / Provision CARES Proton Therapy Center)  
+* **Lead Developer & System Architect:** **Aaron Hutchins** ([ahutchins180@gmail.com](mailto:ahutchins180@gmail.com))  
   *Principal author and architect who conceived, designed, and developed the core Virtual PSQA codebase, DICOM ingestion engine, openMCsquare simulation pipelines, fractional delivery log reconstruction, and clinical QA decision engine.*
 * **Contributor:** **Adam Holt** ([sebaldus.adam@gmail.com](mailto:sebaldus.adam@gmail.com) / GitHub: [`@apholt`](https://github.com/apholt))  
   *Codebase polish, quality-of-life enhancements, openMCsquare scenario robustness analysis, DVH prediction module, and open-source release preparation.*
 
 ### Suggested Platform Citation
 If referencing or citing the Virtual PSQA platform in publications or presentations:
-> Hutchins, A. & Holt, A. *Virtual PSQA: Independent Monte Carlo Secondary Dose Calculation and Fractional Delivery Verification Platform for Proton Pencil Beam Scanning Radiotherapy.* Tennessee Oncology, 2026. [https://github.com/apholt/virtual-psqa-open](https://github.com/apholt/virtual-psqa-open)
+> Hutchins, A. & Holt, A. *Virtual PSQA: Independent Monte Carlo Secondary Dose Calculation and Fractional Delivery Verification Platform for Proton Pencil Beam Scanning Radiotherapy.* 2026. [https://github.com/apholt/virtual-psqa-open](https://github.com/apholt/virtual-psqa-open)
 
 ---
 
@@ -109,8 +109,7 @@ If referencing or citing the Virtual PSQA platform in publications or presentati
   title={{Virtual PSQA}: Independent {Monte Carlo} Secondary Dose Calculation and Fractional Delivery Verification Platform for Proton Pencil Beam Scanning Radiotherapy},
   author={Hutchins, Aaron and Holt, Adam},
   year={2026},
-  howpublished={\url{https://github.com/apholt/virtual-psqa-open}},
-  note={Tennessee Oncology / Provision CARES Proton Therapy Center}
+  howpublished={\url{https://github.com/apholt/virtual-psqa-open}}
 }
 
 @article{souris2016fast,
