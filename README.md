@@ -28,15 +28,15 @@ Virtual PSQA combines **FastAPI**, **React / Vite**, and **openMCsquare** to pro
 
 ### On Linux
 ```bash
-git clone https://github.com/apholt/virtual-psqa.git
-cd virtual-psqa
+git clone https://github.com/apholt/virtual-psqa-open.git
+cd virtual-psqa-open
 chmod +x run.sh
 ./run.sh
 ```
 *Access the web UI at [https://localhost:8000](https://localhost:8000) (or `http://` if SSL is disabled). See [`README_LINUX.md`](README_LINUX.md) for full instructions.*
 
 ### On Windows
-1. Download **`virtual-psqa-windows.zip`** from the [Releases](https://github.com/apholt/virtual-psqa/releases) page.
+1. Download **`virtual-psqa-windows.zip`** from the [Releases](https://github.com/apholt/virtual-psqa-open/releases) page.
 2. Extract to `C:\VirtualPSQA\`.
 3. Double-click **`run.bat`**.
 *Access the web UI at [http://localhost:8000](http://localhost:8000). See [`README_WINDOWS.md`](README_WINDOWS.md) for full instructions.*

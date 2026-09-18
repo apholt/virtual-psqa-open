@@ -55,8 +55,8 @@ The repository includes a self-configuring Linux launcher script [`run.sh`](run.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/apholt/virtual-psqa.git
-cd virtual-psqa
+git clone https://github.com/apholt/virtual-psqa-open.git
+cd virtual-psqa-open
 
 # 2. Make the launcher executable
 chmod +x run.sh
