@@ -347,3 +347,13 @@ sudo systemctl restart virtual-psqa
 | MCsquare crashes or outputs "Please verify processor supports..." | CPU lacks vector instructions for the configured binary | Edit `backend\.env` to select `_avx2`, `_avx`, or `_sse4`. |
 | DICOM files not auto-ingested | Invalid watch folder path or permission | Verify `DICOM_WATCH_FOLDER` exists and has read permissions. |
 | Python / pip command not found | Python not registered in `%PATH%` | Re-run installer with "Add Python to PATH" checked, or use `.\.venv\Scripts\python.exe`. |
+
+---
+
+## Authors & Primary Contributors
+
+* **Aaron Hutchins** ([ahutchins180@gmail.com](mailto:ahutchins180@gmail.com)) — **System Architect**  
+  *Principal author who inspired, designed, and built the core codebase, openMCsquare integration, delivery log reconstruction, and clinical QA decision engine.*
+* **Adam Holt** ([sebaldus.adam@gmail.com](mailto:apholt21@outlook.com) / [@apholt](https://github.com/apholt)) — **Lead Developer & Contributor**  
+  *Codebase improvements, quality-of-life features, ORTHANC integration, HIPAA security requirements, openMCsquare scenario robustness and DVH prediction modules, Linux packaging, and open-source distribution.*
+

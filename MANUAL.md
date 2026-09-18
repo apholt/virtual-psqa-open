@@ -11,7 +11,7 @@
 > **Audience:** the medical physicist / administrator running the app on a clinic
 > Windows workstation.
 >
-> **Authorship & Credits:** Developed by **Aaron Hutchins** (`ahutchins180@gmail.com`, Lead Developer & Architect) with contributions, feature polish, and open-source distribution by **Adam Holt** (`apholt`).
+> **Authorship & Credits:** Conceived and designed by **Aaron Hutchins** (`ahutchins180@gmail.com`, System Architect) with core development, ORTHANC integration, openMCsquare robustness, and open-source distribution by **Adam Holt** (`apholt21@outlook.com`, Lead Developer & Contributor).
 
 ---
 
