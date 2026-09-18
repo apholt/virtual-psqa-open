@@ -8,10 +8,11 @@ If you use Virtual PSQA in your research, clinical studies, or institutional pre
 
 ## 1. Project Authorship & Primary Development
 
-* **Lead Developer & System Architect:** **Aaron Hutchins** ([ahutchins180@gmail.com](mailto:ahutchins180@gmail.com))  
-  *Principal author and architect who conceived, designed, and developed the core Virtual PSQA codebase, DICOM ingestion engine, openMCsquare simulation pipelines, fractional delivery log reconstruction, and clinical QA decision engine.*
-* **Contributor:** **Adam Holt** ([sebaldus.adam@gmail.com](mailto:sebaldus.adam@gmail.com) / GitHub: [`@apholt`](https://github.com/apholt))  
-  *Codebase polish, quality-of-life enhancements, openMCsquare scenario robustness analysis, DVH prediction module, and open-source release preparation.*
+* **Aaron Hutchins** ([ahutchins180@gmail.com](mailto:ahutchins180@gmail.com)) — **System Architect**  
+  *Principal author who inspired, designed, and built the core codebase, openMCsquare integration, delivery log reconstruction, and clinical QA decision engine.*
+* **Adam Holt** ([sebaldus.adam@gmail.com](mailto:apholt21@outlook.com) / [@apholt](https://github.com/apholt)) — **Lead Developer & Contributor**  
+  *Codebase improvements, quality-of-life features, ORTHANC integration, HIPAA security requirements, openMCsquare scenario robustness and DVH prediction modules, Linux packaging, and open-source distribution.*
+
 
 ### Suggested Platform Citation
 If referencing or citing the Virtual PSQA platform in publications or presentations:
