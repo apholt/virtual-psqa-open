@@ -66,6 +66,8 @@ def test_secondary_dose_report_generation(client):
     rep_html = client.get(f"/api/reports/{plan_id}")
     assert rep_html.status_code == 200
     assert "PSQA report" in rep_html.text
+    assert "Field Spatial Dose &amp; Gamma Verification (at Isocenter)" in rep_html.text
+    assert "Secondary Dose &amp; Robustness Dosimetric Criteria Summary" not in rep_html.text
 
     # Test Secondary Dose HTML Report
     sec_html = client.get(f"/api/reports/{plan_id}/secondary-dose")

@@ -36,6 +36,8 @@ def main() -> None:
     assert "Patient Information" in html, "patient info missing"
     assert "Fractional Gamma Passing Rate Trend" in html, "trend section missing"
     assert "Field-by-Field Breakdown" in html, "per-field section missing"
+    assert "Field Spatial Dose &amp; Gamma Verification (at Isocenter)" in html, "field spatial dose section missing"
+    assert "Secondary Dose &amp; Robustness" not in html, "secondary dose calc should be removed from fractional report"
     assert "ELECTRONIC OMR INTEGRATION" in html, "OMR notice missing"
     assert 'class="sign-line"' not in html, "physical sign-off should be absent"
     print(f"[ok] Report HTML built ({len(html)} bytes)")

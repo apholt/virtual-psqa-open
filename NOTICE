@@ -1,0 +1,50 @@
+Virtual PSQA
+Copyright 2026 Aaron Hutchins, Adam Holt
+
+This product includes software developed by Aaron Hutchins and Adam Holt.
+
+========================================================================
+Third-Party Software Acknowledgments & Notices
+========================================================================
+
+1. openMCsquare
+   Fast Monte Carlo dose calculation engine for proton beam therapy.
+   Copyright (C) Université catholique de Louvain (Kevin Souris, John A. Lee, Edmond Sterpin)
+   Licensed under the Apache License, Version 2.0.
+   Repository: https://gitlab.com/openmcsquare/MCsquare
+   Reference: Souris et al., Medical Physics 43(8):4857–4868, 2016.
+
+2. Orthanc
+   Lightweight, RESTful DICOM server and DICOMWeb VNA platform.
+   Copyright (C) Sébastien Jodogne, Université catholique de Louvain, Osimis
+   Licensed under the GNU General Public License v3.0 (interfaced strictly via external HTTP/REST network APIs).
+   Website: https://www.orthanc-server.com
+
+3. SimpleITK / ITK
+   Deformable image registration and multidimensional image analysis toolkit.
+   Copyright (C) Insight Software Consortium
+   Licensed under the Apache License, Version 2.0.
+   Website: https://simpleitk.org
+
+4. pydicom
+   Pure Python package for reading and writing DICOM files.
+   Copyright (C) Darcy Mason and pydicom contributors
+   Licensed under the MIT License and BSD 3-Clause License.
+   Repository: https://github.com/pydicom/pydicom
+
+5. NumPy & SciPy
+   Scientific computing and linear algebra libraries for Python.
+   Copyright (C) NumPy and SciPy Developers
+   Licensed under the BSD 3-Clause License.
+   Website: https://numpy.org / https://scipy.org
+
+6. FastAPI & Starlette
+   High-performance web framework for Python.
+   Copyright (C) Sebastián Ramírez and Starlette contributors
+   Licensed under the MIT License.
+   Repository: https://github.com/fastapi/fastapi
+
+7. React & Vite
+   Frontend UI library and frontend development build tooling.
+   Copyright (C) Meta Platforms, Inc. / Evan You and Vite contributors
+   Licensed under the MIT License.

@@ -171,4 +171,8 @@ For complete academic citations and ready-to-use BibTeX entries, please see [**`
 
 ## License & Clinical Disclaimer
 
+### License
+Virtual PSQA is open-source software licensed under the **[Apache License, Version 2.0](LICENSE)**. See [**`NOTICE`**](NOTICE) for third-party software attributions and copyright notices.
+
+### Clinical Disclaimer
 Virtual PSQA is intended for quality assurance and research verification in radiation oncology. All clinical treatment decisions and plan approvals must be performed in accordance with institutional protocols and approved primary treatment planning systems.

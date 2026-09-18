@@ -90,11 +90,13 @@ def test_fractional_qa_report_and_chart_checks():
     assert "Fractional Delivery Assurance Overview" in html
     assert "Fractional Gamma Passing Rate Trend" in html
     assert "Field-by-Field Breakdown" in html
+    assert "Field Spatial Dose &amp; Gamma Verification (at Isocenter)" in html
+    assert "Secondary Dose &amp; Robustness" not in html
     assert "ELECTRONIC OMR INTEGRATION" in html
     # Ensure physical sign-off signature box is removed
     assert 'class="signoff"' not in html
     assert "Physicist sign-off" not in html
-    print("✓ Test 1: Streamlined Fractional QA Report generated correctly without sign-off block")
+    print("✓ Test 1: Streamlined Fractional QA Report generated correctly with field spatial dose and without secondary dose/sign-off")
 
     # 2. Test Chart Check Tally Initial State
     tally = get_plan_chart_checks(plan_id, db)

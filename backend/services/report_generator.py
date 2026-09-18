@@ -66,18 +66,12 @@ _COMPARISON_LABEL = {
 
 
 
-def _gamma_thumbnail(path: Optional[str], size: int = 180) -> Optional[str]:
-    """Render a saved gamma map (.npz) to a base64 PNG data URI."""
-    if not path:
-        return None
+def _gamma_thumbnail_from_array(raw_map: np.ndarray, size: int = 200) -> Optional[str]:
+    """Render a 2D/3D gamma array to a base64 PNG data URI."""
     try:
         from PIL import Image
         import matplotlib
 
-        data = np.load(path)
-        raw_map = data["gamma_map"] if "gamma_map" in data else (data["gamma"] if "gamma" in data else None)
-        if raw_map is None:
-            return None
         gmap = np.asarray(raw_map, dtype=np.float32)
         if gmap.ndim == 3:
             gmap = gmap[gmap.shape[0] // 2, :, :]
@@ -85,7 +79,6 @@ def _gamma_thumbnail(path: Optional[str], size: int = 180) -> Optional[str]:
             gmap = np.squeeze(gmap)
             if gmap.ndim == 3:
                 gmap = gmap[gmap.shape[0] // 2, :, :]
-        # Mask non-evaluated voxels (NaN / negative) to transparent-ish grey later.
         valid = np.isfinite(gmap)
 
         norm = np.clip(gmap / 2.0, 0.0, 1.0)  # gamma=1 (pass limit) -> mid scale
@@ -93,15 +86,188 @@ def _gamma_thumbnail(path: Optional[str], size: int = 180) -> Optional[str]:
         rgba = (cmap(norm) * 255).astype(np.uint8)
         rgba[~valid] = [40, 45, 52, 255]
         img = Image.fromarray(rgba, mode="RGBA").convert("RGB")
-        # Scale up small maps for a crisp thumbnail.
         img = img.resize((size, size), Image.NEAREST)
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         return f"data:image/png;base64,{b64}"
     except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Could not render gamma array thumbnail: {exc}")
+        return None
+
+
+def _gamma_thumbnail(path: Optional[str], size: int = 200) -> Optional[str]:
+    """Render a saved gamma map (.npz) to a base64 PNG data URI."""
+    if not path:
+        return None
+    try:
+        data = np.load(path)
+        raw_map = data["gamma_map"] if "gamma_map" in data else (data["gamma"] if "gamma" in data else None)
+        if raw_map is None:
+            return None
+        return _gamma_thumbnail_from_array(raw_map, size=size)
+    except Exception as exc:  # noqa: BLE001
         logger.warning(f"Could not render gamma thumbnail {path}: {exc}")
         return None
+
+
+def _render_dose_slice_png(
+    dose_plane: np.ndarray,
+    colormap: str = "turbo",
+    max_val: Optional[float] = None,
+    size: int = 200,
+) -> Optional[str]:
+    """Render a 2D dose plane to a base64 PNG data URI."""
+    try:
+        from PIL import Image
+        import matplotlib
+
+        arr = np.asarray(dose_plane, dtype=np.float32)
+        if arr.ndim == 3:
+            arr = arr[arr.shape[0] // 2, :, :]
+        elif arr.ndim > 3:
+            arr = np.squeeze(arr)
+            if arr.ndim == 3:
+                arr = arr[arr.shape[0] // 2, :, :]
+        if max_val is None or max_val <= 0:
+            max_val = float(np.max(arr)) if arr.size > 0 else 1.0
+        if max_val <= 0:
+            max_val = 1.0
+
+        norm = np.clip(arr / max_val, 0.0, 1.0)
+        cmap = matplotlib.colormaps[colormap]
+        rgba = (cmap(norm) * 255).astype(np.uint8)
+        # Background suppression for near-zero dose
+        mask_zero = arr < (max_val * 0.02)
+        rgba[mask_zero] = [15, 20, 25, 255]
+
+        img = Image.fromarray(rgba, mode="RGBA").convert("RGB")
+        img = img.resize((size, size), Image.NEAREST)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:image/png;base64,{b64}"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Could not render dose slice: {exc}")
+        return None
+
+
+def _get_field_images(
+    r: GammaResult,
+    plan: Plan,
+    db: Session,
+    target_fx_num: Optional[int] = None,
+) -> tuple[Optional[str], Optional[str], Optional[str], str]:
+    """
+    Extracts isocenter spatial dose distributions and gamma error maps for a field.
+    Returns: (dose_img, gamma_img, rx_img, dose_label)
+    """
+    dose_img: Optional[str] = None
+    gamma_img: Optional[str] = None
+    rx_img: Optional[str] = None
+    dose_label = "Field Spatial Dose at Isocenter"
+    plane_idx: Optional[int] = None
+
+    # 1. Inspect r.gamma_map_path if present
+    if r.gamma_map_path:
+        p = Path(r.gamma_map_path)
+        if not p.is_absolute():
+            p = (Path(settings.RESULTS_PATH).parent / p).resolve()
+            if not p.exists():
+                p = Path(r.gamma_map_path).resolve()
+        if p.exists():
+            try:
+                data = np.load(p)
+                raw_gamma = data["gamma"] if "gamma" in data else (data["gamma_map"] if "gamma_map" in data else None)
+                if raw_gamma is not None:
+                    gamma_img = _gamma_thumbnail_from_array(raw_gamma, size=200)
+
+                if "delivered" in data:
+                    deliv_arr = np.asarray(data["delivered"], dtype=np.float32)
+                    dose_img = _render_dose_slice_png(deliv_arr, colormap="turbo", size=200)
+                    dose_label = "Delivered Spatial Dose (Isocenter)"
+
+                if "prescribed" in data:
+                    rx_arr = np.asarray(data["prescribed"], dtype=np.float32)
+                    rx_img = _render_dose_slice_png(rx_arr, colormap="turbo", size=200)
+
+                if "plane_index" in data:
+                    plane_idx = int(data["plane_index"])
+            except Exception as exc:
+                logger.debug(f"Could not load npz from {p}: {exc}")
+
+    # 2. Fallback gamma image from path
+    if gamma_img is None and r.gamma_map_path:
+        gamma_img = _gamma_thumbnail(r.gamma_map_path, size=200)
+
+    # 3. Check per-fraction log reconstruction output files if dose_img is missing
+    if dose_img is None or gamma_img is None:
+        log_dir = Path(settings.RESULTS_PATH) / f"plan_{plan.id}" / "log_reconstruction"
+        fx_list: list[int] = []
+        if target_fx_num is not None:
+            fx_list.append(target_fx_num)
+        if r.fraction_number is not None and r.fraction_number not in fx_list:
+            fx_list.append(r.fraction_number)
+        for def_fx in (0, 1):
+            if def_fx not in fx_list:
+                fx_list.append(def_fx)
+        b_list = [r.beam_number] if r.beam_number is not None else [1, 2, 3, 4, 5, 6]
+
+        for fx in fx_list:
+            for b in b_list:
+                cand = log_dir / f"log_dose_fx{fx}_beam{b}.npz"
+                if cand.exists():
+                    try:
+                        data = np.load(cand)
+                        if gamma_img is None and "gamma" in data:
+                            gamma_img = _gamma_thumbnail_from_array(data["gamma"], size=200)
+                        if dose_img is None and "delivered" in data:
+                            dose_img = _render_dose_slice_png(data["delivered"], colormap="turbo", size=200)
+                            dose_label = "Delivered Spatial Dose (Isocenter)"
+                        if rx_img is None and "prescribed" in data:
+                            rx_img = _render_dose_slice_png(data["prescribed"], colormap="turbo", size=200)
+                        if dose_img and gamma_img:
+                            break
+                    except Exception:
+                        pass
+            if dose_img and gamma_img:
+                break
+
+    # 4. If spatial dose is still missing, try per-beam DICOM RTDose or Plan RTDose
+    if dose_img is None and plan.dicom_store_path and Path(plan.dicom_store_path).exists():
+        try:
+            from services.gamma_analysis import find_beam_rtdose_files, load_rtdose, find_rtdose_file
+            beam_doses = find_beam_rtdose_files(plan.dicom_store_path, plan_uid=plan.rtplan_uid)
+            beam_file = beam_doses.get(r.beam_number) if (beam_doses and r.beam_number) else None
+            if beam_file:
+                grid = load_rtdose(beam_file)
+                z = plane_idx if (plane_idx is not None and 0 <= plane_idx < grid.shape[0]) else grid.max_dose_plane_index()
+                dose_img = _render_dose_slice_png(grid.plane(z), colormap="turbo", size=200)
+                dose_label = f"Field RTDose at Isocenter (Slice z={z})"
+            else:
+                rtdose_file = find_rtdose_file(plan.dicom_store_path, plan_uid=plan.rtplan_uid)
+                if rtdose_file:
+                    grid = load_rtdose(rtdose_file)
+                    z = plane_idx if (plane_idx is not None and 0 <= plane_idx < grid.shape[0]) else grid.max_dose_plane_index()
+                    dose_img = _render_dose_slice_png(grid.plane(z), colormap="turbo", size=200)
+                    dose_label = f"Plan RTDose at Isocenter (Slice z={z})"
+        except Exception as exc:
+            logger.debug(f"Could not load DICOM dose: {exc}")
+
+    # 5. If spatial dose is still missing, fallback to loaded plan doses
+    if dose_img is None:
+        try:
+            from services.gamma_analysis import load_plan_doses
+            doses = load_plan_doses(plan.id, db)
+            tps_grid = doses.get("tps") or doses.get("mcSquare")
+            if tps_grid:
+                z = plane_idx if (plane_idx is not None and 0 <= plane_idx < tps_grid.shape[0]) else tps_grid.max_dose_plane_index()
+                dose_img = _render_dose_slice_png(tps_grid.plane(z), colormap="turbo", size=200)
+                dose_label = f"Spatial Dose at Isocenter (Slice z={z})"
+        except Exception:
+            pass
+
+    return dose_img, gamma_img, rx_img, dose_label
 
 
 def _trend_svg(fraction_points: List[tuple], threshold: float) -> str:
@@ -571,25 +737,82 @@ def build_report_html(plan_id: int, db: Session) -> str:
 
     parts.append('</tbody></table></div>')
 
-    # openMCsquare DVH & Robustness Summary (if available)
-    dvh_data = None
-    try:
-        from services.dvh_service import calculate_plan_dvh_and_robustness
-        dvh_data = calculate_plan_dvh_and_robustness(plan_id, db, force_recompute=False)
-    except Exception as _dvh_err:
-        logger.debug(f"DVH not loaded for report {plan_id}: {_dvh_err}")
+    # 3. Field Spatial Dose Distributions & Gamma Maps at Isocenter
+    parts.append(
+        f'<div class="card">'
+        f'<h2>{escape(record_title)} &mdash; Field Spatial Dose &amp; Gamma Verification (at Isocenter)</h2>'
+        f'<p class="muted" style="margin-bottom:14px;">'
+        f'Planar 2D spatial dose distributions and TG-218 gamma index evaluations at the isocenter plane for each delivery field. '
+        f'Gamma evaluation colormap: <b>&gamma; &le; 1.0 (Pass, Green)</b> to <b>&gamma; &gt; 1.0 (Fail, Red)</b> &middot; '
+        f'Spatial dose colormap: <b>0% (Background/Blue)</b> to <b>100% (Hot Spot/Red)</b>.'
+        f'</p>'
+    )
 
-    if dvh_data and dvh_data.rois:
-        parts.append(
-            '<div class="card">'
-            '<h2>Secondary Dose &amp; Robustness Dosimetric Criteria Summary</h2>'
-            f'<p class="muted" style="margin-bottom:8px;">'
-            f'Monte Carlo (openMCsquare) dosimetric criteria evaluated under nominal and worst-case geometric/range uncertainty envelopes '
-            f'(&plusmn;{dvh_data.setup_uncertainty_mm:g} mm setup, &plusmn;{dvh_data.range_uncertainty_pct:g}% range, {dvh_data.num_scenarios} scenarios).'
-            f'</p>'
-            f'{_render_dvh_table_html(dvh_data)}'
-            '</div>'
-        )
+    if field_rows:
+        target_fx_val = target_frac.fraction_number if target_frac else 1
+        for idx, r in enumerate(field_rows, start=1):
+            f_meta = next((f for f in field_details if f.get("beam_name") == r.field_name or f.get("beam_number") == r.beam_number), {})
+            gantry = f"{f_meta.get('gantry_angle', 0):.0f}&deg;" if "gantry_angle" in f_meta else "—"
+            mu_str = f"{f_meta.get('total_mu', 0):.1f}" if "total_mu" in f_meta else "—"
+            rcol = "#3fb950" if r.passed else "#f85149"
+            rst = "PASS" if r.passed else "FAIL"
+            b_num = r.beam_number or idx
+
+            dose_img, gamma_img, rx_img, dose_label = _get_field_images(r, plan, db, target_fx_num=target_fx_val)
+
+            parts.append(
+                f'<div class="field-qa-block">'
+                f'<div class="field-qa-header">'
+                f'<div>'
+                f'<span class="field-title">Beam {b_num}: {escape(r.field_name)}</span>'
+                f'<span class="muted" style="margin-left:12px;">Gantry: {gantry} &middot; Planned MU: {mu_str}</span>'
+                f'</div>'
+                f'<div>'
+                f'<span class="field-pr" style="color:{rcol};">{r.passing_rate:.1f}%</span>'
+                f'<span class="badge-mini" style="background:{rcol}22;color:{rcol};">{rst}</span>'
+                f'<span class="muted" style="margin-left:8px;font-size:11px;">({r.dd_percent:g}% / {r.dta_mm:g} mm)</span>'
+                f'</div>'
+                f'</div>'
+            )
+
+            parts.append('<div class="img-strip" style="justify-content:flex-start;gap:20px;">')
+            has_img = False
+            if rx_img:
+                has_img = True
+                parts.append(
+                    f'<div class="img-box">'
+                    f'<img src="{rx_img}" class="slice-img" alt="Prescribed Dose"/>'
+                    f'<span>Prescribed Dose (Isocenter)</span>'
+                    f'</div>'
+                )
+            if dose_img:
+                has_img = True
+                parts.append(
+                    f'<div class="img-box">'
+                    f'<img src="{dose_img}" class="slice-img" alt="Spatial Dose"/>'
+                    f'<span>{escape(dose_label)}</span>'
+                    f'</div>'
+                )
+            if gamma_img:
+                has_img = True
+                parts.append(
+                    f'<div class="img-box">'
+                    f'<img src="{gamma_img}" class="slice-img" alt="Gamma Map"/>'
+                    f'<span>Gamma Map ({r.dd_percent:g}%/{r.dta_mm:g}mm &le; 1.0)</span>'
+                    f'</div>'
+                )
+            if not has_img:
+                parts.append(
+                    '<div class="muted" style="padding:12px 6px;">'
+                    'Spatial dose distribution / gamma map image not available on disk for this field.'
+                    '</div>'
+                )
+            parts.append('</div>')
+            parts.append('</div>')
+    else:
+        parts.append('<p class="muted" style="text-align:center;padding:12px;">No delivery record fields logged yet.</p>')
+
+    parts.append('</div>')
 
     # Electronic OMR Sign-Off Notice (No physical physics sign-off box)
     parts.append(
@@ -628,34 +851,6 @@ def render_pdf(html: str) -> Optional[bytes]:
         return None
 
 
-def _render_dose_slice_png(dose_plane: np.ndarray, colormap: str = "turbo", max_val: Optional[float] = None) -> Optional[str]:
-    """Render a 2D dose plane to a base64 PNG data URI."""
-    try:
-        from PIL import Image
-        import matplotlib
-
-        arr = np.asarray(dose_plane, dtype=np.float32)
-        if max_val is None or max_val <= 0:
-            max_val = float(np.max(arr)) if arr.size > 0 else 1.0
-        if max_val <= 0:
-            max_val = 1.0
-
-        norm = np.clip(arr / max_val, 0.0, 1.0)
-        cmap = matplotlib.colormaps[colormap]
-        rgba = (cmap(norm) * 255).astype(np.uint8)
-        # Background suppression for near-zero dose
-        mask_zero = arr < (max_val * 0.02)
-        rgba[mask_zero] = [15, 20, 25, 255]
-
-        img = Image.fromarray(rgba, mode="RGBA").convert("RGB")
-        img = img.resize((220, 220), Image.NEAREST)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        return f"data:image/png;base64,{b64}"
-    except Exception as exc:
-        logger.warning(f"Could not render dose slice: {exc}")
-        return None
 
 
 def build_secondary_dose_report_html(plan_id: int, db: Session) -> str:
@@ -1178,6 +1373,10 @@ _REPORT_CSS = """
   .img-box { text-align: center; }
   .slice-img { width: 220px; height: 220px; border-radius: 6px; border: 1px solid #30363d; image-rendering: pixelated; display: block; margin-bottom: 6px; }
   .img-box span { font-size: 11px; color: #8b949e; }
+  .field-qa-block { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 14px; margin-bottom: 14px; }
+  .field-qa-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #21262d; padding-bottom: 8px; flex-wrap: wrap; gap: 8px; }
+  .field-title { font-size: 14px; font-weight: 700; color: #f0f6fc; }
+  .field-pr { font-size: 15px; font-weight: 800; margin-right: 8px; }
   .signoff .sign-line { display: flex; align-items: flex-end; gap: 12px; margin-top: 18px; font-size: 13px; color: #8b949e; }
   .sign-line .line { flex: 1; border-bottom: 1px solid #6e7681; height: 18px; }
   .sign-line .line.short { max-width: 220px; }
@@ -1191,6 +1390,10 @@ _REPORT_CSS = """
     .report { max-width: 100% !important; padding: 0 !important; }
     .actions { display: none !important; }
     .card { background: #fff !important; border: 1px solid #ddd !important; break-inside: avoid; color: #111 !important; box-shadow: none !important; margin-bottom: 10px !important; }
+    .field-qa-block { background: #fff !important; border-color: #ddd !important; break-inside: avoid; margin-bottom: 10px !important; }
+    .field-qa-header { border-bottom-color: #eee !important; }
+    .field-title { color: #111 !important; }
+    .field-pr { color: inherit !important; }
     .param-box { background: #f8f9fa !important; border-color: #eee !important; }
     .param-lbl, .muted, .kv span, .tbl th, .img-box span { color: #555 !important; }
     .param-val, h1, h2, b { color: #111 !important; }
