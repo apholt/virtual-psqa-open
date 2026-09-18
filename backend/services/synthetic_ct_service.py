@@ -155,6 +155,7 @@ def _find_and_load_reg_transform(
         Path("/home/aholt/Downloads/syntheticQA-20260914T150440Z-1-001"),
         Path("/home/aholt/Downloads"),
         Path("/home/aholt/Projects/virtual-psqa/watch_folder"),
+        Path("/home/aholt/Projects/virtual-psqa-open/watch_folder"),
     ]
     for ed in extra_dirs:
         if ed.is_dir():

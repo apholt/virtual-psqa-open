@@ -253,7 +253,7 @@ To run Virtual PSQA as a persistent background service on a clinical Linux serve
 sudo nano /etc/systemd/system/virtual-psqa.service
 ```
 
-Paste the following configuration (replace `/home/aholt/Projects/virtual-psqa` and `aholt` with your user path):
+Paste the following configuration (replace `/path/to/virtual-psqa-open` and `YOUR_USERNAME` with your actual system user and repository path):
 ```ini
 [Unit]
 Description=Virtual PSQA Clinical Radiation Therapy QA Service
@@ -261,11 +261,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=aholt
-WorkingDirectory=/home/aholt/Projects/virtual-psqa/backend
-Environment="PATH=/home/aholt/Projects/virtual-psqa/.venv_linux/bin:/usr/local/bin:/usr/bin"
-Environment="PYTHONPATH=/home/aholt/Projects/virtual-psqa/backend"
-ExecStart=/home/aholt/Projects/virtual-psqa/.venv_linux/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/virtual-psqa-open/backend
+Environment="PATH=/path/to/virtual-psqa-open/.venv_linux/bin:/usr/local/bin:/usr/bin"
+Environment="PYTHONPATH=/path/to/virtual-psqa-open/backend"
+ExecStart=/path/to/virtual-psqa-open/.venv_linux/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
 
@@ -293,6 +293,15 @@ journalctl -u virtual-psqa -f
 * **Strict PHI Protection**: All imported patient DICOM files, reconstructed doses, and SQLite tables reside strictly in `backend/data/` (configured in [`.gitignore`](.gitignore)).
 * **Clean Initialization**: When cloned or downloaded fresh, the application automatically initializes an empty database schema (`backend/data/psqa.db`) on first startup.
 * **Air-gapped Compatibility**: Virtual PSQA requires no external cloud connections and runs entirely on your local clinic network or workstation.
+
+---
+
+## Comprehensive Documentation
+
+For full operations, multi-platform guidance, Orthanc integration, and HIPAA user management, please refer to:
+- [**`DEPLOYMENT.md`**](DEPLOYMENT.md) — Comprehensive operations, updating, and service deployment guide.
+- [**`MANUAL.md`**](MANUAL.md) — Complete clinical user manual and theory reference.
+- [**`CITATIONS.md`**](CITATIONS.md) — Academic citations and scientific acknowledgments.
 
 ---
 
