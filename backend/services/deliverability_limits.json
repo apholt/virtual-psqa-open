@@ -1,0 +1,84 @@
+{
+  "_README": [
+    "ProNova SC360 commissioned delivery envelope.",
+    "",
+    "SOURCE: RayStation machine model (Scanning data / Snouts tabs) and the",
+    "beam meterset calibration energy table. The gantry and fixed-beam rooms",
+    "are BEAM MATCHED, so all beam parameters live in 'defaults' and apply to",
+    "both; only mechanical limits (gantry angle, snout) differ per room.",
+    "",
+    "VALUE SEMANTICS -- three states, and the difference matters:",
+    "  null        not yet determined. Blocks clearance (fail-closed).",
+    "  \"unlimited\" an explicit decision that this machine imposes no such",
+    "              limit. Counts as configured; the rule is not enforced.",
+    "  a number    enforced against every planned spot/layer/setting.",
+    "",
+    "Never replace a null with a guessed number to unblock a plan. If no limit",
+    "exists, say so with \"unlimited\" -- that records the decision and is",
+    "auditable; an invented number is neither.",
+    "",
+    "ROOM KEYS come from TreatmentMachineName in the RT Ion PLAN. Note these",
+    "differ from the RT Ion RECORD names ('TR1_Franklin_GR1',",
+    "'TR2_MusicCity_GR2') that services/room_spc.py keys on.",
+    "",
+    "To re-survey observed values (P:/PSQA is the watch folder and empties on",
+    "ingest, so survey the store):",
+    "",
+    "    python -m services.deliverability survey ./data"
+  ],
+
+  "defaults": {
+    "_source": "RayStation Scanning data tab: min spot meterset 0.0200 MU/fx, max spot meterset 1.5000 MU/fx, min energy layer meterset 0.2000 MU/fx. Snout SN25: field limit x -12.50 to 12.50 cm, y -12.50 to 12.50 cm. Energy table: 69.24 to 226.08 MeV. Rooms are beam matched, so these apply to both.",
+
+    "spot_mu_min": 0.02,
+    "spot_mu_max": 1.5,
+    "layer_mu_min": 0.2,
+
+    "field_extent_x_mm": 125.0,
+    "field_extent_y_mm": 125.0,
+
+    "energy_min_mev": 69.24,
+    "energy_max_mev": 226.08,
+
+    "_modulation_note": "Spots per layer and energy layers per field vary widely with target size, depth and modulation -- they are plan properties, not machine caps. Recorded as \"unlimited\" to state that decision explicitly rather than inventing a ceiling. Observed range across 21 stored plans: up to 1797 spots/layer and 29 layers/field. If the control system does impose a hard cap, replace with that number.",
+    "spots_per_layer_max": "unlimited",
+    "energy_layers_per_field_max": "unlimited",
+
+    "_range_shifter_note": "RayStation snout-mounted objects: RS40 (3.47 cm PMMA), RS60 (5.17 cm), RS80 (6.91 cm), all patient side, 29.00 x 27.00 cm lateral. Only RS60 appears in the 21 stored plans, but all three are commissioned and permitted.",
+    "range_shifter_ids_allowed": ["RS40", "RS60", "RS80"],
+
+    "_air_gap_note": "CONFIRM THIS ONE. No independent air-gap limit appears in the machine model: SN25 lists tray distance 0.00 with range shifters mounted patient side, so the achievable air gap is already bounded by the snout position span (120-755 mm), which IS enforced above. Recorded as \"unlimited\" on that reasoning. If commissioning specifies a separate minimum or maximum air gap -- for spot-size degradation at large gaps, say -- replace these with the numbers.",
+    "air_gap_min_mm": "unlimited",
+    "air_gap_max_mm": "unlimited",
+
+    "gantry_angles_allowed": null,
+    "snout_positions_allowed": null
+  },
+
+  "rooms": {
+    "ProNova SC360 GR": {
+      "_comment": "Gantry rooms (TR1_Franklin_GR1, TR2_MusicCity_GR2). Beam matched to FB, so beam parameters come from defaults. The plan DICOM does not distinguish GR1 from GR2; since the rooms are beam matched this is not a problem for the beam envelope, but if their MECHANICAL limits ever differ these values must be the intersection.",
+
+      "_gantry_note": "Observed angles span 1-359 deg with no clustering, consistent with continuous rotation. Replace with an explicit list if the machine permits only discrete settings.",
+      "gantry_angles_allowed": { "continuous": true },
+
+      "_snout_note": "Snout SN25 is type 'Continuous' with position span 12.00-75.50 cm. This also resolves the 755 mm snout position seen in GR plans: it is the fully retracted end of a legitimate continuous range, not a mislabelled fixed-beam plan.",
+      "snout_positions_allowed": { "min": 120.0, "max": 755.0 }
+    },
+
+    "ProNova SC360 FB": {
+      "_comment": "Fixed-beam room. Beam matched to GR, so beam parameters come from defaults.",
+
+      "_fixed_geometry_note": "Gantry 90 deg and snout 755 mm are structural facts of a fixed-beam room, and every one of the 12 surveyed FB beams uses exactly these. Confirm against commissioning before relying on them.",
+      "gantry_angles_allowed": [90.0],
+      "snout_positions_allowed": [755.0]
+    }
+  },
+
+  "tolerance": {
+    "_comment": "Numeric slack when comparing against limits, to absorb float-representation noise in DICOM values.",
+    "energy_mev": 0.01,
+    "position_mm": 0.01,
+    "mu": 1e-6
+  }
+}

@@ -1,0 +1,7 @@
+Name			gold
+Atomic_Weight		196.97
+Density			19.32	# in g/cm3
+Electron_Density	4.66e+24	# in cm-3
+Radiation_Length	6.46		# in g/cm2
+
+Nuclear_Data		ICRU

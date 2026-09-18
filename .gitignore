@@ -1,0 +1,46 @@
+# Virtual environments & bundled runtimes
+.venv/
+.venv_linux/
+.bundle_ready
+python/
+
+# Distribution archives (Use GitHub Releases for packages > 100 MB)
+*.zip
+virtual-psqa-windows.zip
+
+# Runtime data & patient stores (Strict Zero-PHI)
+data/
+backend/data/
+!backend/data/dicom_store/.gitkeep
+!backend/data/results/.gitkeep
+!backend/data/dicom_watch/.gitkeep
+watch_folder/
+!watch_folder/.gitkeep
+test_out/
+
+# Environment configs & secrets
+backend/.env
+.env
+*.env
+backend/certs/
+*.pem
+*.key
+*.crt
+
+# Logs and backups
+logs/
+*.log
+*.log.*
+*.bak
+*.bak_*
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+backend/.pytest_cache/
+
+# Frontend dependencies & build artifacts
+frontend/node_modules/
+frontend/dist/
