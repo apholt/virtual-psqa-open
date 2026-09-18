@@ -11,18 +11,47 @@ PSQA_PORT="${PSQA_PORT:-8000}"
 export PYTHONPATH="$ROOT/backend:$PYTHONPATH"
 
 # 1. Locate Python virtual environment
+PY=""
 if [ -d "$ROOT/.venv_linux" ] && [ -f "$ROOT/.venv_linux/bin/python" ]; then
     PY="$ROOT/.venv_linux/bin/python"
 elif [ -d "$ROOT/.venv" ] && [ -f "$ROOT/.venv/bin/python" ]; then
     PY="$ROOT/.venv/bin/python"
 elif command -v uv &>/dev/null; then
+    echo "Creating Python virtual environment (.venv_linux) using uv..."
     uv venv "$ROOT/.venv_linux"
-    "$ROOT/.venv_linux/bin/pip" install -r requirements.txt
+    uv pip install -r "$ROOT/requirements.txt" --python "$ROOT/.venv_linux/bin/python"
     PY="$ROOT/.venv_linux/bin/python"
 elif command -v python3 &>/dev/null; then
-    PY="python3"
+    echo "Creating Python virtual environment (.venv_linux)..."
+    python3 -m venv "$ROOT/.venv_linux"
+    if [ -f "$ROOT/.venv_linux/bin/pip" ]; then
+        "$ROOT/.venv_linux/bin/pip" install --upgrade pip
+        "$ROOT/.venv_linux/bin/pip" install -r "$ROOT/requirements.txt"
+    else
+        "$ROOT/.venv_linux/bin/python" -m ensurepip --upgrade 2>/dev/null || true
+        "$ROOT/.venv_linux/bin/python" -m pip install -r "$ROOT/requirements.txt"
+    fi
+    PY="$ROOT/.venv_linux/bin/python"
 else
     echo "ERROR: Python 3 is not installed or not in PATH."
+    exit 1
+fi
+
+# 1b. Verify that core dependencies (uvicorn, fastapi) are installed in the selected environment
+if ! "$PY" -c "import uvicorn, fastapi" &>/dev/null; then
+    echo "Dependencies missing in $PY. Installing requirements from requirements.txt..."
+    if command -v uv &>/dev/null; then
+        uv pip install -r "$ROOT/requirements.txt" --python "$PY"
+    elif [ -f "$(dirname "$PY")/pip" ]; then
+        "$(dirname "$PY")/pip" install -r "$ROOT/requirements.txt"
+    else
+        "$PY" -m pip install -r "$ROOT/requirements.txt"
+    fi
+fi
+
+if ! "$PY" -c "import uvicorn" &>/dev/null; then
+    echo "ERROR: 'uvicorn' could not be loaded from $PY."
+    echo "Please ensure dependencies are installed via: pip install -r requirements.txt"
     exit 1
 fi
 

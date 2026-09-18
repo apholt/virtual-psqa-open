@@ -172,25 +172,30 @@ Install required system libraries (OpenMP runtime and WeasyPrint dependencies):
 
 ---
 
-### Automated Linux Launcher (`run.sh`)
+### Automated Linux Setup & Launcher
 
 ```bash
 # 1. Clone repository
 git clone https://github.com/apholt/virtual-psqa-open.git
 cd virtual-psqa-open
 
-# 2. Make executable & run
-chmod +x run.sh
+# 2. Make scripts executable
+chmod +x setup.sh run.sh
+
+# 3. (Optional) Run one-time setup:
+./setup.sh
+
+# 4. Launch Virtual PSQA:
 ./run.sh
 ```
 
-**What `./run.sh` does:**
+**What `./run.sh` / `./setup.sh` does automatically:**
 - Detects or initializes `.venv_linux/`.
-- Verifies Python dependencies.
+- Automatically verifies and installs Python dependencies (including `uvicorn` and `fastapi`).
 - Compiles `frontend/dist/` if missing.
 - Sets executable permissions on `MCsquare/MCsquare_linux*`.
 - Normalizes CRLF line endings on Monte Carlo materials and BDL files.
-- Launches the FastAPI server at `http://localhost:8000`.
+- Launches the FastAPI server at `http://localhost:8000` (or `https://localhost:8000`).
 
 ---
 

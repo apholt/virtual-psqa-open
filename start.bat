@@ -38,6 +38,13 @@ if not defined PY (
     exit /b 1
 )
 
+REM 1b. Verify that core dependencies (uvicorn, fastapi) are installed
+"%PY%" -c "import uvicorn, fastapi" >nul 2>nul
+if errorlevel 1 (
+    echo [INFO] Installing required dependencies into %PY%...
+    "%PY%" -m pip install -r "%ROOT%requirements.txt"
+)
+
 REM 2. Verify frontend distribution build exists
 if not exist "%ROOT%frontend\dist\index.html" (
     echo.

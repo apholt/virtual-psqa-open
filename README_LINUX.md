@@ -49,29 +49,32 @@ sudo dnf install -y python3 python3-devel nodejs npm \
 
 ---
 
-## Quick Start (Automated Launcher)
+## Quick Start (Automated Launcher & Setup)
 
-The repository includes a self-configuring Linux launcher script [`run.sh`](run.sh):
+The repository includes a self-configuring Linux launcher script [`run.sh`](run.sh) and one-time setup script [`setup.sh`](setup.sh):
 
 ```bash
 # 1. Clone the repository
 git clone https://github.com/apholt/virtual-psqa-open.git
 cd virtual-psqa-open
 
-# 2. Make the launcher executable
-chmod +x run.sh
+# 2. Make the scripts executable
+chmod +x setup.sh run.sh
 
-# 3. Launch Virtual PSQA
+# 3. (Optional) Run one-time bundle setup
+./setup.sh
+
+# 4. Launch Virtual PSQA
 ./run.sh
 ```
 
-### What `./run.sh` Does Automatically:
+### What `./run.sh` / `./setup.sh` Does Automatically:
 1. Detects or creates a Python virtual environment (`.venv_linux`).
-2. Installs or verifies all Python dependencies from `requirements.txt`.
+2. Automatically verifies and installs all Python dependencies (including `uvicorn`, `fastapi`, `pydicom`, `scipy`) from `requirements.txt`.
 3. Verifies if the React web frontend (`frontend/dist/`) is compiled, and runs `npm install && npm run build` if missing.
 4. Sets executable permissions (`chmod +x`) on all Linux openMCsquare binaries (`MCsquare/MCsquare_linux*`).
 5. Normalizes line endings on Monte Carlo materials and configuration files (`\r\n` $\rightarrow$ `\n`).
-6. Starts the FastAPI server at **`http://localhost:8000`** with live hot-reloading.
+6. Starts the FastAPI server with live hot-reloading.
 
 ---
 
