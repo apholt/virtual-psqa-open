@@ -147,10 +147,10 @@ pytest backend/tests/ -v
 
 ## Authors & Primary Contributors
 
-* **Aaron Hutchins** ([ahutchins180@gmail.com](mailto:ahutchins180@gmail.com)) — **Lead Developer & System Architect**  
-  *Principal author who designed and built the core codebase, clinical data pipelines, openMCsquare integration, delivery log reconstruction, and clinical QA decision engine.*
-* **Adam Holt** ([sebaldus.adam@gmail.com](mailto:sebaldus.adam@gmail.com) / [@apholt](https://github.com/apholt)) — **Contributor**  
-  *Codebase polish, quality-of-life features, openMCsquare scenario robustness and DVH prediction modules, Linux packaging, and open-source distribution.*
+* **Aaron Hutchins** ([ahutchins180@gmail.com](mailto:ahutchins180@gmail.com)) — **System Architect**  
+  *Principal author who inspired, designed, and built the core codebase, openMCsquare integration, delivery log reconstruction, and clinical QA decision engine.*
+* **Adam Holt** ([sebaldus.adam@gmail.com](mailto:apholt21@outlook.com) / [@apholt](https://github.com/apholt)) — **Lead Developer & Contributor**  
+  *Codebase improvements, quality-of-life features, ORTHANC integration, HIPAA security requirements, openMCsquare scenario robustness and DVH prediction modules, Linux packaging, and open-source distribution.*
 
 ---
 
