@@ -167,6 +167,187 @@ def _nice_ticks(lo: float, hi: float, n: int = 4) -> List[float]:
     return [round(lo + step * i) for i in range(n + 1)]
 
 
+def _dvh_svg(dvh_data, w: int = 760, h: int = 280) -> str:
+    """Inline SVG cumulative DVH chart with shaded robustness uncertainty envelopes."""
+    if not dvh_data or not getattr(dvh_data, "rois", None):
+        return ""
+
+    pad_l, pad_b, pad_t, pad_r = 50, 40, 20, 30
+    plot_w = w - pad_l - pad_r
+    plot_h = h - pad_t - pad_b
+
+    # Determine max dose across all ROIs
+    max_dose = 10.0
+    if getattr(dvh_data, "prescription_dose_gy", None):
+        max_dose = max(max_dose, float(dvh_data.prescription_dose_gy) * 1.15)
+    for roi in dvh_data.rois:
+        if getattr(roi, "dvh", None) and roi.dvh.dose_bins_gy:
+            max_dose = max(max_dose, float(roi.dvh.dose_bins_gy[-1]))
+        if getattr(roi, "metrics", None) and getattr(roi.metrics, "d_max", None) and roi.metrics.d_max.mc_max:
+            max_dose = max(max_dose, float(roi.metrics.d_max.mc_max) * 1.05)
+
+    max_dose = max(10.0, float(max_dose))
+
+    def px(d: float) -> float:
+        return pad_l + plot_w * min(1.0, max(0.0, d / max_dose))
+
+    def py(v: float) -> float:
+        return pad_t + plot_h * (1.0 - min(1.0, max(0.0, v / 100.0)))
+
+    # Grid lines & ticks
+    # Y: 0, 20, 40, 60, 80, 100%
+    y_ticks = [0, 20, 40, 60, 80, 100]
+    grid_lines = []
+    for yv in y_ticks:
+        yp = py(yv)
+        grid_lines.append(
+            f'<line x1="{pad_l}" y1="{yp:.1f}" x2="{w - pad_r}" y2="{yp:.1f}" stroke="#21262d" stroke-width="1"/>'
+            f'<text x="{pad_l - 8}" y="{yp + 4:.1f}" font-size="10" text-anchor="end" fill="#7d8590">{yv}%</text>'
+        )
+
+    # X: nice steps
+    x_step = 10.0 if max_dose >= 50 else (5.0 if max_dose >= 20 else 2.0)
+    xv = 0.0
+    while xv <= max_dose + 0.01:
+        xp = px(xv)
+        grid_lines.append(
+            f'<line x1="{xp:.1f}" y1="{pad_t}" x2="{xp:.1f}" y2="{h - pad_b}" stroke="#21262d" stroke-width="1"/>'
+            f'<text x="{xp:.1f}" y="{h - pad_b + 16}" font-size="10" text-anchor="middle" fill="#7d8590">{xv:.0f}</text>'
+        )
+        xv += x_step
+
+    axis_labels = (
+        f'<text x="{pad_l + plot_w / 2:.1f}" y="{h - 6}" font-size="11" text-anchor="middle" fill="#8b949e">Dose (Gy)</text>'
+        f'<text x="14" y="{pad_t + plot_h / 2:.1f}" font-size="11" text-anchor="middle" fill="#8b949e" transform="rotate(-90 14 {pad_t + plot_h / 2:.1f})">Volume (%)</text>'
+    )
+
+    rx_line = ""
+    rx = getattr(dvh_data, "prescription_dose_gy", None)
+    if rx and rx <= max_dose:
+        rx_x = px(rx)
+        rx_line = (
+            f'<line x1="{rx_x:.1f}" y1="{pad_t}" x2="{rx_x:.1f}" y2="{h - pad_b}" '
+            f'stroke="#f85149" stroke-width="1.5" stroke-dasharray="4 3"/>'
+            f'<text x="{rx_x + 4:.1f}" y="{pad_t + 12}" font-size="10" fill="#f85149" font-weight="600">Rx: {rx:.1f} Gy</text>'
+        )
+
+    paths = []
+    for roi in dvh_data.rois:
+        dvh = getattr(roi, "dvh", None)
+        if not dvh or not dvh.dose_bins_gy:
+            continue
+        bins = dvh.dose_bins_gy
+        color = getattr(roi, "color", None) or "#58a6ff"
+
+        # 1. Shaded Uncertainty Band
+        if dvh.mc_min_volume_pct and dvh.mc_max_volume_pct:
+            min_pts = [f"{px(b):.1f},{py(v):.1f}" for b, v in zip(bins, dvh.mc_min_volume_pct)]
+            max_pts = [f"{px(b):.1f},{py(v):.1f}" for b, v in reversed(list(zip(bins, dvh.mc_max_volume_pct)))]
+            band_d = f"M {min_pts[0]} " + " ".join(f"L {pt}" for pt in min_pts[1:]) + " " + " ".join(f"L {pt}" for pt in max_pts) + " Z"
+            paths.append(f'<path d="{band_d}" fill="{color}" fill-opacity="0.22" stroke="none"/>')
+
+        # 2. TPS curve (dashed)
+        if getattr(dvh, "tps_volume_pct", None):
+            tps_pts = " ".join(f"{px(b):.1f},{py(v):.1f}" for b, v in zip(bins, dvh.tps_volume_pct))
+            paths.append(f'<polyline points="{tps_pts}" fill="none" stroke="{color}" stroke-width="1.5" stroke-dasharray="4 3" stroke-opacity="0.75"/>')
+
+        # 3. MC Nominal curve (solid)
+        if dvh.mc_nominal_volume_pct:
+            nom_pts = " ".join(f"{px(b):.1f},{py(v):.1f}" for b, v in zip(bins, dvh.mc_nominal_volume_pct))
+            paths.append(f'<polyline points="{nom_pts}" fill="none" stroke="{color}" stroke-width="2.2" stroke-linecap="round"/>')
+
+    legend_items = []
+    for roi in dvh_data.rois[:8]:
+        color = getattr(roi, "color", None) or "#58a6ff"
+        legend_items.append(
+            f'<span style="display:inline-flex;align-items:center;margin-right:12px;margin-bottom:4px;">'
+            f'<span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:{color};margin-right:4px;"></span>'
+            f'{escape(roi.name)}'
+            f'</span>'
+        )
+
+    return f"""
+    <div class="dvh-container">
+      <svg class="dvh-chart" width="{w}" height="{h}" viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">
+        {''.join(grid_lines)}
+        {rx_line}
+        {''.join(paths)}
+        {axis_labels}
+      </svg>
+      <div class="dvh-legend">
+        <div>{''.join(legend_items)}</div>
+        <div style="font-size:10px;">
+          <span style="border-bottom:2px solid #58a6ff;padding-bottom:1px;margin-right:8px;">&mdash; openMCsquare (Nominal)</span>
+          <span style="border-bottom:2px dashed #8b949e;padding-bottom:1px;margin-right:8px;">- - TPS Reference</span>
+          <span style="background:rgba(88,166,255,0.22);padding:1px 4px;border-radius:2px;">Shaded: Scenario Bounds</span>
+        </div>
+      </div>
+    </div>
+    """
+
+
+def _render_dvh_table_html(dvh_data) -> str:
+    """Render HTML table of clinical dosimetric metrics and worst-case robustness intervals."""
+    if not dvh_data or not getattr(dvh_data, "rois", None):
+        return ""
+
+    rows = []
+    for roi in dvh_data.rois:
+        m = roi.metrics
+        color = getattr(roi, "color", None) or "#58a6ff"
+        is_target = getattr(roi, "is_target", False)
+        type_str = getattr(roi, "type", "OAR")
+        badge_col = "#f85149" if is_target else "#58a6ff"
+        type_badge = f'<span class="badge-mini" style="background:{badge_col}22;color:{badge_col};">{escape(type_str)}</span>'
+
+        tps_d95 = f"{m.d95.tps:.1f} Gy" if (m.d95 and m.d95.tps is not None) else "&mdash;"
+        mc_d95 = f"<b>{m.d95.mc_nominal:.1f} Gy</b> <span class='muted' style='font-size:10px;'>[{m.d95.mc_min:.1f} &ndash; {m.d95.mc_max:.1f}]</span>"
+        mc_d50 = f"{m.d50.mc_nominal:.1f} Gy" if m.d50 else "&mdash;"
+        mc_d2 = f"{m.d2.mc_nominal:.1f} Gy" if m.d2 else "&mdash;"
+        mc_dmean = f"{m.d_mean.mc_nominal:.1f} Gy" if m.d_mean else "&mdash;"
+
+        if roi.robustness_pass:
+            st_badge = '<span class="badge-mini" style="background:#3fb95022;color:#3fb950;border:1px solid #3fb95055;">ROBUST PASS</span>'
+        else:
+            note = escape(roi.robustness_note or "Action required")
+            st_badge = f'<span class="badge-mini" style="background:#d2992222;color:#d29922;border:1px solid #d2992255;" title="{note}">ACTION</span>'
+
+        rows.append(
+            f'<tr>'
+            f'<td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{color};margin-right:6px;"></span><b>{escape(roi.name)}</b></td>'
+            f'<td>{type_badge}</td>'
+            f'<td class="num">{roi.volume_cc:.1f}</td>'
+            f'<td class="num">{tps_d95}</td>'
+            f'<td class="num">{mc_d95}</td>'
+            f'<td class="num">{mc_d50}</td>'
+            f'<td class="num">{mc_d2}</td>'
+            f'<td class="num muted">{mc_dmean}</td>'
+            f'<td>{st_badge}</td>'
+            f'</tr>'
+        )
+
+    return f"""
+    <table class="tbl" style="margin-top:10px;">
+      <thead>
+        <tr>
+          <th>Structure</th>
+          <th>Type</th>
+          <th style="text-align:right;">Vol (cc)</th>
+          <th style="text-align:right;">TPS D95%</th>
+          <th style="text-align:right;">openMCsquare D95% [Min &ndash; Max]</th>
+          <th style="text-align:right;">MC D50% (Median)</th>
+          <th style="text-align:right;">MC D2% (Hot Spot)</th>
+          <th style="text-align:right;">MC Dmean</th>
+          <th>Robustness Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(rows)}
+      </tbody>
+    </table>
+    """
+
+
 def build_report_html(plan_id: int, db: Session) -> str:
     """
     Streamlined Fractional QA and Delivery Verification Report.
@@ -389,6 +570,26 @@ def build_report_html(plan_id: int, db: Session) -> str:
         parts.append('<tr><td colspan="7" style="text-align:center;color:#8b949e;padding:12px;">No delivery record fields logged yet.</td></tr>')
 
     parts.append('</tbody></table></div>')
+
+    # openMCsquare DVH & Robustness Summary (if available)
+    dvh_data = None
+    try:
+        from services.dvh_service import calculate_plan_dvh_and_robustness
+        dvh_data = calculate_plan_dvh_and_robustness(plan_id, db, force_recompute=False)
+    except Exception as _dvh_err:
+        logger.debug(f"DVH not loaded for report {plan_id}: {_dvh_err}")
+
+    if dvh_data and dvh_data.rois:
+        parts.append(
+            '<div class="card">'
+            '<h2>Secondary Dose &amp; Robustness Dosimetric Criteria Summary</h2>'
+            f'<p class="muted" style="margin-bottom:8px;">'
+            f'Monte Carlo (openMCsquare) dosimetric criteria evaluated under nominal and worst-case geometric/range uncertainty envelopes '
+            f'(&plusmn;{dvh_data.setup_uncertainty_mm:g} mm setup, &plusmn;{dvh_data.range_uncertainty_pct:g}% range, {dvh_data.num_scenarios} scenarios).'
+            f'</p>'
+            f'{_render_dvh_table_html(dvh_data)}'
+            '</div>'
+        )
 
     # Electronic OMR Sign-Off Notice (No physical physics sign-off box)
     parts.append(
@@ -700,6 +901,28 @@ def build_secondary_dose_report_html(plan_id: int, db: Session) -> str:
 
     parts.append('</div></div>')
 
+    # openMCsquare Robustness Analysis & DVH Predictions
+    dvh_data = None
+    try:
+        from services.dvh_service import calculate_plan_dvh_and_robustness
+        dvh_data = calculate_plan_dvh_and_robustness(plan_id, db, force_recompute=False)
+    except Exception as _dvh_err:
+        logger.warning(f"Failed loading DVH for secondary dose report {plan_id}: {_dvh_err}")
+
+    if dvh_data and dvh_data.rois:
+        rx_note = f" &middot; Target Prescription Dose: <b>{dvh_data.prescription_dose_gy:.1f} Gy</b>" if dvh_data.prescription_dose_gy else ""
+        parts.append(
+            '<div class="card">'
+            '<h2>openMCsquare Robustness Analysis &amp; DVH Predictions</h2>'
+            '<div class="muted" style="margin-bottom:8px;">'
+            f'Cumulative DVH curves and worst-case scenario envelopes across <b>{dvh_data.num_scenarios} clinical scenarios</b> '
+            f'(&plusmn;{dvh_data.setup_uncertainty_mm:g} mm setup uncertainty, &plusmn;{dvh_data.range_uncertainty_pct:g}% range scaling){rx_note}.'
+            '</div>'
+            f'{_dvh_svg(dvh_data)}'
+            f'{_render_dvh_table_html(dvh_data)}'
+            '</div>'
+        )
+
     # Clinical Gate Verdict
     if _gate:
         vlabel, vcolor = _GATE_LABEL.get(_gate["status"], (_gate["status"], "#7d8590"))
@@ -959,6 +1182,9 @@ _REPORT_CSS = """
   .sign-line .line { flex: 1; border-bottom: 1px solid #6e7681; height: 18px; }
   .sign-line .line.short { max-width: 220px; }
   .comment-box { border: 1px solid #30363d; height: 50px; border-radius: 6px; background: #0d1117; margin-top: 6px; }
+  .dvh-container { text-align: center; margin-top: 10px; margin-bottom: 14px; }
+  svg.dvh-chart { max-width: 100%; height: auto; background: #0d1117; border-radius: 6px; border: 1px solid #21262d; }
+  .dvh-legend { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; font-size: 11px; margin-top: 6px; color: #8b949e; }
   .footer { text-align: center; color: #8b949e; font-size: 11px; margin-top: 24px; border-top: 1px solid #21262d; padding-top: 12px; }
   @media print {
     body { background: #fff !important; color: #111 !important; font-size: 11pt; }
@@ -974,6 +1200,10 @@ _REPORT_CSS = """
     .notice-badge { color: #0969da !important; }
     .notice-text { color: #24292f !important; }
     .sign-line .line { border-bottom-color: #000 !important; }
+    svg.dvh-chart { background: #fff !important; border-color: #ddd !important; }
+    svg.dvh-chart line { stroke: #e1e4e8 !important; }
+    svg.dvh-chart text { fill: #24292f !important; }
+    .dvh-legend { color: #555 !important; }
     .footer { color: #666 !important; border-top-color: #ddd !important; }
   }
 </style>

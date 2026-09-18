@@ -72,6 +72,8 @@ def test_secondary_dose_report_generation(client):
     assert sec_html.status_code == 200
     assert "Secondary Dose Calculation" in sec_html.text
     assert "Gamma Analysis" in sec_html.text
+    assert "openMCsquare Robustness Analysis" in sec_html.text
+    assert "openMCsquare D95%" in sec_html.text
 
     # Test Secondary Dose PDF Report
     sec_pdf = client.get(f"/api/reports/{plan_id}/secondary-dose?format=pdf")
