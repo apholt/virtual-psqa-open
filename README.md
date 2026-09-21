@@ -160,7 +160,7 @@ pytest backend/tests/ -v
 
 Virtual PSQA integrates and builds upon several key open-source medical physics projects and published clinical QA methodologies:
 
-* **[openMCsquare](https://github.com/openMCsquare/MCsquare)**: Fast Monte Carlo proton dose engine (*Souris et al., Med Phys 2016*).
+* **[openMCsquare](https://gitlab.com/openMCsquare/MCsquare)**: Fast Monte Carlo proton dose engine (*Souris et al., Med Phys 2016*).
 * **[Orthanc](https://www.orthanc-server.com)**: Open-source DICOM VNA & DICOMWeb server (*Jodogne S., J Digit Imaging 2018*).
 * **[SimpleITK / ITK](https://simpleitk.org)**: Deformable Image Registration (DIR) using Diffeomorphic Demons for Synthetic CT calculation (*Lowekamp et al., Front Neuroinform 2013*; *Vercauteren et al., NeuroImage 2009*).
 * **[pydicom](https://github.com/pydicom/pydicom)**: Medical imaging and DICOM RT object manipulation library (*Mason et al.*).
