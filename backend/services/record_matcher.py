@@ -262,18 +262,48 @@ def record_fraction_number(dcm: pydicom.Dataset) -> Optional[int]:
     if record_delivery_type(dcm) == "verification":
         return 0
 
-    # Preferred: nested per-beam CurrentFractionNumber (3008,0022).
+    # 1. Preferred: nested per-beam CurrentFractionNumber (3008,0022) or ReferencedFractionNumber (3008,0223).
     seq = (getattr(dcm, "TreatmentSessionIonBeamSequence", None)
            or getattr(dcm, "TreatmentSessionBeamSequence", None) or [])
     for item in seq:
-        n = _coerce_fraction_int(getattr(item, "CurrentFractionNumber", None))
-        if n is not None:
-            return n
+        for attr in ("CurrentFractionNumber", "ReferencedFractionNumber"):
+            n = _coerce_fraction_int(getattr(item, attr, None))
+            if n is not None:
+                return n
+            val = item.get((0x3008, 0x0022), None) or item.get((0x3008, 0x0223), None)
+            if val is not None:
+                n = _coerce_fraction_int(getattr(val, "value", val))
+                if n is not None:
+                    return n
 
-    # Secondary: top-level attrs (some vendors put it here).
-    for attr in ("CurrentFractionNumber", "FractionNumber"):
+    # 2. FractionGroupSequence / ReferencedFractionGroupSequence (standard in many TPS/OIS exports)
+    fg_seq = (getattr(dcm, "FractionGroupSequence", None)
+              or getattr(dcm, "ReferencedFractionGroupSequence", None) or [])
+    for fg in fg_seq:
+        for attr in ("ReferencedFractionNumber", "CurrentFractionNumber", "FractionNumber"):
+            n = _coerce_fraction_int(getattr(fg, attr, None))
+            if n is not None:
+                return n
+            val = fg.get((0x3008, 0x0223), None) or fg.get((0x3008, 0x0022), None)
+            if val is not None:
+                n = _coerce_fraction_int(getattr(val, "value", val))
+                if n is not None:
+                    return n
+
+    # 3. Top-level attrs (some vendors put it here).
+    for attr in ("CurrentFractionNumber", "FractionNumber", "ReferencedFractionNumber"):
         n = _coerce_fraction_int(getattr(dcm, attr, None))
         if n is not None:
             return n
+
+    # 4. Text regex fallback from descriptions or series name (e.g. "Fraction 2", "fx7", "tx_9")
+    import re
+    text = f"{getattr(dcm, 'SeriesDescription', '')} {getattr(dcm, 'StudyDescription', '')}"
+    m = re.search(r"(?:fx|fraction|tx)[\s_-]*(\d+)", text, re.IGNORECASE)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
 
     return None

@@ -34,6 +34,16 @@ from services.interruption_detector import detect_record_interruption
 
 logger = logging.getLogger(__name__)
 
+RTRECORD_SOP_CLASSES = {
+    "1.2.840.10008.5.1.4.1.1.481.4",  # RT Beams Treatment Record Storage
+    "1.2.840.10008.5.1.4.1.1.481.6",  # RT Brachy Treatment Record Storage
+    "1.2.840.10008.5.1.4.1.1.481.7",  # RT Treatment Summary Record Storage
+    "1.2.840.10008.5.1.4.1.1.481.9",  # RT Ion Beams Treatment Record Storage (Proton/Ion)
+    "1.2.840.10008.5.1.4.1.1.481.10", # RT Ion Radiation Record Storage
+    "1.2.840.10008.5.1.4.1.1.481.11", # RT Ion Radiation Summary Record Storage
+}
+RTRECORD_MODALITIES = {"RTRECORD", "RTIBTR", "IONRECORD", "RECORD", "RTR"}
+
 
 def file_sha256(path: Path | str) -> str:
     h = hashlib.sha256()
@@ -88,11 +98,27 @@ def classify_dicom_files(directory: str) -> dict[str, list[str]]:
     Returns dict keyed by Modality string, values are lists of file paths.
     Handles RTPLAN, RTDOSE, RTSTRUCT, RTIBTR/RTRECORD (RT Treatment Records).
     Deduplicates identical files within the directory (by SHA256, SOPInstanceUID, or RTDose fingerprint).
+    Automatically unpacks any .zip archives present in the directory.
     """
+    import zipfile
+    dir_path = Path(directory)
+
+    # Automatically unpack any zip archives found in the directory
+    for zpath in list(dir_path.rglob("*")):
+        if zpath.is_file() and zpath.name.lower().endswith(".zip"):
+            extract_dir = zpath.parent / f"_extracted_{zpath.stem}"
+            if not extract_dir.exists():
+                try:
+                    extract_dir.mkdir(exist_ok=True)
+                    with zipfile.ZipFile(zpath, "r") as zf:
+                        zf.extractall(str(extract_dir))
+                except Exception as ze:
+                    logger.warning(f"Could not extract zip archive {zpath.name}: {ze}")
+
     result: dict[str, list[str]] = {}
-    candidates = set(Path(directory).rglob("*.dcm")) | set(Path(directory).rglob("*.DCM"))
-    for p in Path(directory).rglob("*"):
-        if p.is_file() and p not in candidates and not p.name.startswith("."):
+    candidates = set(dir_path.rglob("*.dcm")) | set(dir_path.rglob("*.DCM"))
+    for p in dir_path.rglob("*"):
+        if p.is_file() and p not in candidates and not p.name.startswith(".") and not p.name.lower().endswith(".zip"):
             candidates.add(p)
 
     seen_hashes: dict[str, str] = {}
@@ -118,10 +144,7 @@ def classify_dicom_files(directory: str) -> dict[str, list[str]]:
 
             modality = str(dcm.get("Modality", "UNKNOWN")).upper()
             sop_class = str(dcm.get("SOPClassUID", ""))
-            if modality in ("RTIBTR", "RTRECORD") or sop_class in (
-                "1.2.840.10008.5.1.4.1.1.481.4",
-                "1.2.840.10008.5.1.4.1.1.481.7",
-            ):
+            if modality in RTRECORD_MODALITIES or sop_class in RTRECORD_SOP_CLASSES:
                 modality = "RTRECORD"
             elif modality == "RTDOSE":
                 full_dcm = pydicom.dcmread(str(path), force=True)
@@ -327,7 +350,7 @@ def validate_dicom_set(classified: dict, rtplan_dcm: Optional[pydicom.Dataset] =
     """
     warnings_list: list[str] = []
 
-    has_plan = bool(classified.get("RTPLAN") or classified.get("RTIBTR"))
+    has_plan = bool(classified.get("RTPLAN"))
     if not has_plan:
         warnings_list.append("No RTPlan or RTIonPlan file found.")
 
@@ -378,7 +401,7 @@ def archive_ingested_files(source_folder: str, patient_id: str, plan_uid: str) -
                 mod = str(dcm.get("Modality", "")).upper()
                 sop = str(getattr(dcm, "SOPInstanceUID", ""))
 
-                if mod in ("RTPLAN", "RTIBTR") and sop and sop != plan_uid:
+                if mod == "RTPLAN" and sop and sop != plan_uid:
                     logger.warning(
                         f"Skipping archive of foreign RTPLAN {f.name} (UID {sop}); target plan is {plan_uid}"
                     )
@@ -425,12 +448,31 @@ def ingest_rtrecord_files(
         dcm = pydicom.dcmread(rec_path, stop_before_pixels=True, force=True)
         pinfo = extract_patient_info(dcm)
         last_patient_info = pinfo
-
         patient_id_str = pinfo["patient_id"]
-        patient = db.query(Patient).filter_by(patient_id=patient_id_str).first()
+
+        # 1. Match to plan
+        plan: Optional[Plan] = None
+        if target_plan_id is not None:
+            plan = db.query(Plan).filter_by(id=target_plan_id).first()
+
+        if plan is None:
+            try:
+                matched_id = identify_plan_from_rtrecord(dcm, db, target_plan_id=None)
+                plan = db.query(Plan).filter_by(id=matched_id).first()
+            except ValueError:
+                pass
+
+        # 2. Match or create Patient
+        patient: Optional[Patient] = None
+        if plan is not None:
+            patient = db.query(Patient).filter_by(id=plan.patient_id).first()
+
+        if patient is None and patient_id_str and patient_id_str != "UNKNOWN":
+            patient = db.query(Patient).filter_by(patient_id=patient_id_str).first()
+
         if patient is None:
             patient = Patient(
-                patient_id=pinfo["patient_id"],
+                patient_id=patient_id_str or f"PT_{uuid.uuid4().hex[:8]}",
                 patient_name=pinfo["patient_name"],
                 date_of_birth=pinfo["date_of_birth"],
                 sex=pinfo["sex"],
@@ -438,21 +480,17 @@ def ingest_rtrecord_files(
             db.add(patient)
             db.flush()
 
-        # Match to plan
-        try:
-            plan_id = identify_plan_from_rtrecord(dcm, db, target_plan_id=target_plan_id)
-        except ValueError as exc:
+        # 3. If plan not yet resolved, search patient's plans or create provisional plan
+        if plan is None:
             patient_plans = (
                 db.query(Plan)
                 .filter_by(patient_id=patient.id)
                 .order_by(Plan.created_at.desc())
                 .all()
             )
-            if len(patient_plans) >= 1:
-                plan_id = patient_plans[0].id
+            if patient_plans:
+                plan = patient_plans[0]
             else:
-                # No plan exists yet for this patient! Create a provisional plan
-                # so the RTRecord can be ingested without failing.
                 ref_seq = getattr(dcm, "ReferencedRTPlanSequence", None)
                 ref_uid = None
                 if ref_seq and len(ref_seq) > 0:
@@ -466,9 +504,9 @@ def ingest_rtrecord_files(
                 plan_label = str(
                     dcm.get("RTPlanLabel", "")
                     or getattr(dcm, "SeriesDescription", "")
-                    or f"Plan_{patient_id_str}"
+                    or f"Plan_{patient.patient_id}"
                 )
-                dest_dir = Path(settings.DICOM_STORE_PATH) / patient_id_str / ref_uid
+                dest_dir = Path(settings.DICOM_STORE_PATH) / patient.patient_id / ref_uid
                 dest_dir.mkdir(parents=True, exist_ok=True)
 
                 provisional_plan = Plan(
@@ -484,11 +522,9 @@ def ingest_rtrecord_files(
                 db.add(provisional_plan)
                 db.commit()
                 db.refresh(provisional_plan)
-                plan_id = provisional_plan.id
+                plan = provisional_plan
 
-        plan = db.query(Plan).filter_by(id=plan_id).first()
-        if not plan:
-            raise ValueError(f"Plan {plan_id} not found in database.")
+        plan_id = plan.id
         matched_plans[plan.id] = plan
 
         deliv_type = record_delivery_type(dcm)
@@ -1063,10 +1099,11 @@ def ingest_dicom_directory(upload_path: str, db: Session, target_plan_uid: Optio
 
             # If old store path was different from dest_path, copy existing files into dest_path
             if old_store_path and Path(old_store_path).resolve() != Path(dest_path).resolve() and Path(old_store_path).exists():
-                for old_f in Path(old_store_path).glob("*.dcm"):
-                    new_f = Path(dest_path) / old_f.name
-                    if not new_f.exists():
-                        shutil.copy2(str(old_f), str(new_f))
+                for old_f in Path(old_store_path).glob("*"):
+                    if old_f.is_file() and not old_f.name.startswith("."):
+                        new_f = Path(dest_path) / old_f.name
+                        if not new_f.exists():
+                            shutil.copy2(str(old_f), str(new_f))
                 for f in existing_plan.fractions:
                     if f.rtrecord_path and Path(f.rtrecord_path).parent.resolve() == Path(old_store_path).resolve():
                         f.rtrecord_path = str(Path(dest_path) / Path(f.rtrecord_path).name)

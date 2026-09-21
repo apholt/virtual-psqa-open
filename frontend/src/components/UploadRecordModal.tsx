@@ -17,11 +17,16 @@ export function UploadRecordModal({ planId, planLabel, onClose, onSuccess }: Pro
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const isAccepted = (name: string) => {
+    const lower = name.toLowerCase();
+    if (lower.endsWith(".dcm") || lower.endsWith(".dicom") || lower.endsWith(".zip") || lower.endsWith(".bin")) return true;
+    if (!name.includes(".")) return true; // PACS raw SOPInstanceUID files often lack extension
+    return false;
+  };
+
   const addFiles = (incoming: FileList | null) => {
     if (!incoming) return;
-    const list = Array.from(incoming).filter(
-      (f) => f.name.endsWith(".dcm") || f.name.endsWith(".DCM") || f.name.endsWith(".zip")
-    );
+    const list = Array.from(incoming).filter((f) => isAccepted(f.name));
     setFiles((prev) => {
       const names = new Set(prev.map((f) => f.name));
       return [...prev, ...list.filter((f) => !names.has(f.name))];
@@ -108,7 +113,7 @@ export function UploadRecordModal({ planId, planLabel, onClose, onSuccess }: Pro
               ref={inputRef}
               type="file"
               multiple
-              accept=".dcm,.DCM,.zip"
+              accept=".dcm,.DCM,.dicom,.DICOM,.zip,.ZIP,*"
               className="hidden"
               onChange={(e) => addFiles(e.target.files)}
             />

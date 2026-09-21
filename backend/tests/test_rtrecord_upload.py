@@ -48,10 +48,18 @@ def _make_dummy_plan(patient_id="PT_UPLOAD_TEST", plan_uid=None):
     return plan
 
 
-def _make_dummy_record(patient_id="PT_UPLOAD_TEST", plan_uid=None, fraction_number=1, is_verification=False):
+def _make_dummy_record(
+    patient_id="PT_UPLOAD_TEST",
+    plan_uid=None,
+    fraction_number=1,
+    is_verification=False,
+    modality="RTRECORD",
+    sop_class_uid="1.2.840.10008.5.1.4.1.1.481.7",
+    use_fraction_group_seq=False,
+):
     rec = Dataset()
-    rec.Modality = "RTRECORD"
-    rec.SOPClassUID = "1.2.840.10008.5.1.4.1.1.481.7"
+    rec.Modality = modality
+    rec.SOPClassUID = sop_class_uid
     rec.SOPInstanceUID = f"1.2.826.0.1.3680043.9.7243.{uuid.uuid4().hex[:8]}.rec"
     rec.PatientID = patient_id
     rec.TreatmentDate = "20260921"
@@ -70,9 +78,18 @@ def _make_dummy_record(patient_id="PT_UPLOAD_TEST", plan_uid=None, fraction_numb
     b1.BeamName = "BEAM_1:TX"
     b1.BeamTerminationStatus = "NORMAL"
     b1.TreatmentDeliveryType = "VERIFICATION" if is_verification else "TREATMENT"
-    b1.CurrentFractionNumber = 0 if is_verification else fraction_number
     b1.SpecifiedPrimaryMeterset = 100.0
     b1.DeliveredPrimaryMeterset = 100.0
+
+    if not is_verification:
+        if use_fraction_group_seq:
+            fg = Dataset()
+            fg.ReferencedFractionNumber = fraction_number
+            rec.FractionGroupSequence = Sequence([fg])
+        else:
+            b1.CurrentFractionNumber = fraction_number
+    else:
+        b1.CurrentFractionNumber = 0
 
     rec.TreatmentSessionIonBeamSequence = Sequence([b1])
 
@@ -293,3 +310,199 @@ def test_upload_accompanied_rtplan_and_rtrecord(tmp_path):
         assert frac.rtrecord_uid == rec_dcm.SOPInstanceUID
     finally:
         db.close()
+
+
+def test_upload_proton_rtionrecord_sop_class_481_9_and_modality_rtibtr(tmp_path):
+    """Test uploading standard proton RT Ion Beams Treatment Record (SOPClassUID 481.9, Modality RTIBTR)."""
+    client = TestClient(app)
+    client.cookies[settings.AUTH_SESSION_COOKIE] = create_session_token("test_physicist")
+    db = SessionLocal()
+
+    try:
+        rand = uuid.uuid4().hex[:8]
+        pid = f"PT_PROTON_{rand}"
+        plan_uid = f"1.2.826.0.1.3680043.9.7243.{rand}.proton_plan"
+
+        plan_dcm = _make_dummy_plan(patient_id=pid, plan_uid=plan_uid)
+        plan_bytes = _dataset_to_bytes(plan_dcm)
+
+        # First upload the plan
+        resp = client.post(
+            "/api/plans/upload",
+            files=[("files", ("Plan.dcm", plan_bytes, "application/dicom"))],
+        )
+        assert resp.status_code == 200, resp.text
+        plan_id = resp.json()["plan_id"]
+
+        # Now upload proton RT Ion Record with SOPClassUID 1.2.840.10008.5.1.4.1.1.481.9 and Modality RTIBTR
+        rec_dcm = _make_dummy_record(
+            patient_id=pid,
+            plan_uid=plan_uid,
+            fraction_number=2,
+            modality="RTIBTR",
+            sop_class_uid="1.2.840.10008.5.1.4.1.1.481.9",
+        )
+        rec_bytes = _dataset_to_bytes(rec_dcm)
+
+        # Upload directly to the plan's records endpoint
+        resp2 = client.post(
+            f"/api/plans/{plan_id}/upload-records",
+            files=[("files", ("IonRecord_fx2.dcm", rec_bytes, "application/dicom"))],
+        )
+        assert resp2.status_code == 200, resp2.text
+
+        frac2 = db.query(Fraction).filter_by(plan_id=plan_id, fraction_number=2).first()
+        assert frac2 is not None
+        assert frac2.rtrecord_uid == rec_dcm.SOPInstanceUID
+        assert frac2.delivery_type == "curative"
+    finally:
+        db.close()
+
+
+def test_upload_extensionless_and_raw_uid_rtrecord(tmp_path):
+    """Test uploading RTRecord files that lack .dcm extensions (common in PACS exports)."""
+    client = TestClient(app)
+    client.cookies[settings.AUTH_SESSION_COOKIE] = create_session_token("test_physicist")
+    db = SessionLocal()
+
+    try:
+        rand = uuid.uuid4().hex[:8]
+        pid = f"PT_RAW_{rand}"
+        plan_uid = f"1.2.826.0.1.3680043.9.7243.{rand}.raw_plan"
+
+        plan_dcm = _make_dummy_plan(patient_id=pid, plan_uid=plan_uid)
+        plan_bytes = _dataset_to_bytes(plan_dcm)
+
+        resp = client.post(
+            "/api/plans/upload",
+            files=[("files", ("Plan.dcm", plan_bytes, "application/dicom"))],
+        )
+        assert resp.status_code == 200, resp.text
+        plan_id = resp.json()["plan_id"]
+
+        rec_dcm = _make_dummy_record(
+            patient_id=pid,
+            plan_uid=plan_uid,
+            fraction_number=3,
+            modality="RTRECORD",
+            sop_class_uid="1.2.840.10008.5.1.4.1.1.481.9",
+        )
+        rec_bytes = _dataset_to_bytes(rec_dcm)
+
+        # Extensionless filename: raw SOPInstanceUID
+        raw_filename = f"RI.{rec_dcm.SOPInstanceUID}"
+        resp2 = client.post(
+            f"/api/plans/{plan_id}/upload-records",
+            files=[("files", (raw_filename, rec_bytes, "application/octet-stream"))],
+        )
+        assert resp2.status_code == 200, resp2.text
+
+        frac3 = db.query(Fraction).filter_by(plan_id=plan_id, fraction_number=3).first()
+        assert frac3 is not None
+        assert frac3.rtrecord_uid == rec_dcm.SOPInstanceUID
+    finally:
+        db.close()
+
+
+def test_upload_rtrecord_fraction_number_from_fraction_group_sequence(tmp_path):
+    """Test extracting fraction number when specified in FractionGroupSequence.ReferencedFractionNumber."""
+    client = TestClient(app)
+    client.cookies[settings.AUTH_SESSION_COOKIE] = create_session_token("test_physicist")
+    db = SessionLocal()
+
+    try:
+        rand = uuid.uuid4().hex[:8]
+        pid = f"PT_FXSEQ_{rand}"
+        plan_uid = f"1.2.826.0.1.3680043.9.7243.{rand}.seq_plan"
+
+        plan_dcm = _make_dummy_plan(patient_id=pid, plan_uid=plan_uid)
+        plan_bytes = _dataset_to_bytes(plan_dcm)
+
+        resp = client.post(
+            "/api/plans/upload",
+            files=[("files", ("Plan.dcm", plan_bytes, "application/dicom"))],
+        )
+        assert resp.status_code == 200, resp.text
+        plan_id = resp.json()["plan_id"]
+
+        # Generate fraction 7 with fraction number strictly in FractionGroupSequence
+        rec_dcm7 = _make_dummy_record(
+            patient_id=pid,
+            plan_uid=plan_uid,
+            fraction_number=7,
+            modality="RTIBTR",
+            sop_class_uid="1.2.840.10008.5.1.4.1.1.481.9",
+            use_fraction_group_seq=True,
+        )
+        # Generate fraction 9 with fraction number strictly in FractionGroupSequence
+        rec_dcm9 = _make_dummy_record(
+            patient_id=pid,
+            plan_uid=plan_uid,
+            fraction_number=9,
+            modality="RTIBTR",
+            sop_class_uid="1.2.840.10008.5.1.4.1.1.481.9",
+            use_fraction_group_seq=True,
+        )
+
+        resp_fx7 = client.post(
+            f"/api/plans/{plan_id}/upload-records",
+            files=[("files", ("rec_fx7.dcm", _dataset_to_bytes(rec_dcm7), "application/dicom"))],
+        )
+        assert resp_fx7.status_code == 200, resp_fx7.text
+
+        resp_fx9 = client.post(
+            f"/api/plans/{plan_id}/upload-records",
+            files=[("files", ("rec_fx9.dcm", _dataset_to_bytes(rec_dcm9), "application/dicom"))],
+        )
+        assert resp_fx9.status_code == 200, resp_fx9.text
+
+        frac7 = db.query(Fraction).filter_by(plan_id=plan_id, fraction_number=7).first()
+        frac9 = db.query(Fraction).filter_by(plan_id=plan_id, fraction_number=9).first()
+        assert frac7 is not None, "Fraction 7 was not identified from FractionGroupSequence"
+        assert frac9 is not None, "Fraction 9 was not identified from FractionGroupSequence"
+        assert frac7.rtrecord_uid == rec_dcm7.SOPInstanceUID
+        assert frac9.rtrecord_uid == rec_dcm9.SOPInstanceUID
+    finally:
+        db.close()
+
+
+def test_upload_zip_with_multiple_records(tmp_path):
+    """Test uploading a zip archive containing multiple RTRecords."""
+    import zipfile
+    client = TestClient(app)
+    client.cookies[settings.AUTH_SESSION_COOKIE] = create_session_token("test_physicist")
+    db = SessionLocal()
+
+    try:
+        rand = uuid.uuid4().hex[:8]
+        pid = f"PT_ZIP_{rand}"
+        plan_uid = f"1.2.826.0.1.3680043.9.7243.{rand}.zip_plan"
+
+        plan_dcm = _make_dummy_plan(patient_id=pid, plan_uid=plan_uid)
+        rec2 = _make_dummy_record(patient_id=pid, plan_uid=plan_uid, fraction_number=2, sop_class_uid="1.2.840.10008.5.1.4.1.1.481.9")
+        rec3 = _make_dummy_record(patient_id=pid, plan_uid=plan_uid, fraction_number=3, sop_class_uid="1.2.840.10008.5.1.4.1.1.481.9")
+
+        # Create zip containing plan and both records
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w") as zf:
+            zf.writestr("plan.dcm", _dataset_to_bytes(plan_dcm))
+            zf.writestr("record_fx2.dcm", _dataset_to_bytes(rec2))
+            zf.writestr("record_fx3.dcm", _dataset_to_bytes(rec3))
+        zip_buf.seek(0)
+
+        resp = client.post(
+            "/api/plans/upload",
+            files=[("files", ("treatment_package.zip", zip_buf.read(), "application/zip"))],
+        )
+        assert resp.status_code == 200, resp.text
+        plan_id = resp.json()["plan_id"]
+
+        frac2 = db.query(Fraction).filter_by(plan_id=plan_id, fraction_number=2).first()
+        frac3 = db.query(Fraction).filter_by(plan_id=plan_id, fraction_number=3).first()
+        assert frac2 is not None
+        assert frac3 is not None
+        assert frac2.rtrecord_uid == rec2.SOPInstanceUID
+        assert frac3.rtrecord_uid == rec3.SOPInstanceUID
+    finally:
+        db.close()
+

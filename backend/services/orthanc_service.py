@@ -31,7 +31,12 @@ from models.fraction import Fraction
 from models.patient import Patient
 from models.plan import Plan
 from models.synthetic_ct import SyntheticCT
-from services.dicom_ingestor import ingest_dicom_directory, ingest_rtrecord_files
+from services.dicom_ingestor import (
+    ingest_dicom_directory,
+    ingest_rtrecord_files,
+    RTRECORD_SOP_CLASSES,
+    RTRECORD_MODALITIES,
+)
 from services.synthetic_ct_service import ingest_cbct_series
 
 logger = logging.getLogger(__name__)
@@ -366,11 +371,11 @@ def get_orthanc_patient_details(
         rt_records: list[dict[str, Any]] = []
         offline_images: list[dict[str, Any]] = []
 
-        # Find RT Plans
+        # Find RT Plans (Modality RTPLAN, excluding treatment records)
         rtplan_series = [
             s for s in all_series
-            if s["modality"] in ("RTPLAN", "RTIBTR")
-            and s["sop_class_uid"] not in ("1.2.840.10008.5.1.4.1.1.481.4", "1.2.840.10008.5.1.4.1.1.481.7")
+            if s["modality"] == "RTPLAN"
+            and s["sop_class_uid"] not in RTRECORD_SOP_CLASSES
         ]
 
         for ps in rtplan_series:
@@ -448,11 +453,11 @@ def get_orthanc_patient_details(
                 "local_plan_id": local_plan_id,
             })
 
-        # Find RT Records (modality RTRECORD or RT Beams Treatment Record SOP Classes)
+        # Find RT Records (modality RTRECORD/RTIBTR/IONRECORD or RT Treatment Record SOP Classes)
         rec_series = [
             s for s in all_series
-            if s["modality"] in ("RTRECORD", "RTIBTR")
-            or s["sop_class_uid"] in ("1.2.840.10008.5.1.4.1.1.481.4", "1.2.840.10008.5.1.4.1.1.481.7")
+            if s["modality"] in RTRECORD_MODALITIES
+            or s["sop_class_uid"] in RTRECORD_SOP_CLASSES
         ]
         for rs in rec_series:
             r_extra = rs["extra"]

@@ -64,6 +64,8 @@ from services.log_reconstruction import reconstruct_from_record
 from services.log_gamma import gamma_log_vs_rx
 from services.interruption_detector import detect_record_interruption
 from services.record_matcher import _find_plan_dicom
+from dicom.rtdose_parser import clean_store_duplicates
+from services.dicom_ingestor import RTRECORD_SOP_CLASSES, RTRECORD_MODALITIES
 
 logger = logging.getLogger(__name__)
 
@@ -264,15 +266,27 @@ def _resolve_plan_file(plan: Plan) -> str:
         raise FileNotFoundError(
             f"Plan {plan.id}: store path does not exist: {store}")
 
+    # Remove any byte/SOP duplicate files in the store first
+    try:
+        clean_store_duplicates(str(store))
+    except Exception:
+        pass
+
     candidates = []
-    for p in store.rglob("*.dcm"):
+    for p in store.rglob("*"):
+        if not p.is_file() or p.name.startswith(".") or p.name.lower().endswith(".zip"):
+            continue
         try:
             ds = pydicom.dcmread(str(p), stop_before_pixels=True, force=True,
                                  specific_tags=["Modality", "SOPInstanceUID",
-                                                "PatientID"])
+                                                "PatientID", "SOPClassUID"])
         except Exception:
             continue
-        if str(getattr(ds, "Modality", "")).upper() == "RTPLAN":
+        mod = str(getattr(ds, "Modality", "")).upper()
+        sop_class = str(getattr(ds, "SOPClassUID", ""))
+        is_plan = (mod == "RTPLAN" or sop_class in ("1.2.840.10008.5.1.4.1.1.481.5", "1.2.840.10008.5.1.4.1.1.481.8"))
+        is_record = (mod in RTRECORD_MODALITIES or sop_class in RTRECORD_SOP_CLASSES)
+        if is_plan and not is_record:
             candidates.append((str(p), str(getattr(ds, "SOPInstanceUID", "")),
                                str(getattr(ds, "PatientID", ""))))
 
@@ -360,13 +374,25 @@ def _resolve_record_file(plan: Plan, frac: Fraction) -> str:
         store_dir = Path(plan.dicom_store_path)
         if not store_dir.is_absolute():
             store_dir = (Path(settings.DICOM_STORE_PATH).parent / plan.dicom_store_path).resolve()
-        if store_dir.exists() and want:
-            for cand in store_dir.rglob("*.dcm"):
-                if _sop_uid(str(cand)) == want:
+        if store_dir.exists():
+            for cand in store_dir.rglob("*"):
+                if not cand.is_file() or cand.name.startswith(".") or cand.name.lower().endswith(".zip"):
+                    continue
+                if want and _sop_uid(str(cand)) == want:
                     logger.info(f"Self-healed rtrecord_path for plan {plan.id} fx {frac.fraction_number}: {cand}")
                     frac.rtrecord_path = str(cand)
                     path = cand
                     break
+            if not path.exists():
+                for cand in store_dir.rglob("*"):
+                    if not cand.is_file() or cand.name.startswith(".") or cand.name.lower().endswith(".zip"):
+                        continue
+                    cname = cand.name.lower()
+                    if (frac.fraction_number == 0 and "verif" in cname) or f"fx{frac.fraction_number}" in cname or f"fraction_{frac.fraction_number}" in cname:
+                        logger.info(f"Self-healed rtrecord_path by fraction pattern for plan {plan.id} fx {frac.fraction_number}: {cand}")
+                        frac.rtrecord_path = str(cand)
+                        path = cand
+                        break
 
     if not path.exists():
         raise FileNotFoundError(

@@ -13,7 +13,13 @@ from config import settings
 from database import get_db
 from models.plan import Plan
 from schemas.plan import FieldSummary, PlanIngestionResponse, PlanSummary
-from services.dicom_ingestor import ingest_dicom_directory, parse_rtplan_fields, ingest_rtrecord_files
+from services.dicom_ingestor import (
+    ingest_dicom_directory,
+    parse_rtplan_fields,
+    ingest_rtrecord_files,
+    RTRECORD_SOP_CLASSES,
+    RTRECORD_MODALITIES,
+)
 import pydicom
 
 logger = logging.getLogger(__name__)
@@ -28,8 +34,8 @@ async def upload_dicom(
     db: Session = Depends(get_db),
 ):
     """
-    Accepts multipart upload of multiple .dcm files or a single .zip.
-    Saves to a temp directory, runs ingestion, returns summary.
+    Accepts multipart upload of multiple .dcm files or .zip archives.
+    Saves to a temp directory, unpacks archives, runs ingestion, returns summary.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         saved_files: list[str] = []
@@ -40,15 +46,18 @@ async def upload_dicom(
             dest.write_bytes(content)
             saved_files.append(str(dest))
 
-        # If a single zip was uploaded, extract it
-        if len(saved_files) == 1 and saved_files[0].lower().endswith(".zip"):
-            extract_dir = Path(tmpdir) / "extracted"
-            extract_dir.mkdir()
-            with zipfile.ZipFile(saved_files[0], "r") as zf:
-                zf.extractall(str(extract_dir))
-            ingest_dir = str(extract_dir)
-        else:
-            ingest_dir = tmpdir
+        # Unpack any uploaded zip archives
+        for sf in list(saved_files):
+            if sf.lower().endswith(".zip"):
+                try:
+                    extract_dir = Path(tmpdir) / f"extracted_{Path(sf).stem}"
+                    extract_dir.mkdir(exist_ok=True)
+                    with zipfile.ZipFile(sf, "r") as zf:
+                        zf.extractall(str(extract_dir))
+                except Exception as ze:
+                    logger.warning(f"Could not extract zip archive {sf}: {ze}")
+
+        ingest_dir = tmpdir
 
         try:
             result = ingest_dicom_directory(ingest_dir, db)
@@ -106,30 +115,30 @@ async def upload_plan_records(
             dest.write_bytes(content)
             saved_files.append(str(dest))
 
-        # If a single zip was uploaded, extract it
-        if len(saved_files) == 1 and saved_files[0].lower().endswith(".zip"):
-            extract_dir = Path(tmpdir) / "extracted"
-            extract_dir.mkdir()
-            with zipfile.ZipFile(saved_files[0], "r") as zf:
-                zf.extractall(str(extract_dir))
-            search_dir = extract_dir
-        else:
-            search_dir = Path(tmpdir)
+        # Unpack any uploaded zip archives
+        for sf in list(saved_files):
+            if sf.lower().endswith(".zip"):
+                try:
+                    extract_dir = Path(tmpdir) / f"extracted_{Path(sf).stem}"
+                    extract_dir.mkdir(exist_ok=True)
+                    with zipfile.ZipFile(sf, "r") as zf:
+                        zf.extractall(str(extract_dir))
+                except Exception as ze:
+                    logger.warning(f"Could not extract zip archive {sf}: {ze}")
+
+        search_dir = Path(tmpdir)
 
         # Collect candidate DICOM files
         record_paths: list[str] = []
         for p in search_dir.rglob("*"):
-            if p.is_file() and not p.name.startswith("."):
+            if p.is_file() and not p.name.startswith(".") and not p.name.lower().endswith(".zip"):
                 try:
                     d = pydicom.dcmread(str(p), stop_before_pixels=True, force=True)
                     mod = str(getattr(d, "Modality", "")).upper()
                     sop_class = str(getattr(d, "SOPClassUID", ""))
-                    if mod in ("RTRECORD", "RTIBTR") or sop_class in (
-                        "1.2.840.10008.5.1.4.1.1.481.4",
-                        "1.2.840.10008.5.1.4.1.1.481.7",
-                    ):
+                    if mod in RTRECORD_MODALITIES or sop_class in RTRECORD_SOP_CLASSES:
                         record_paths.append(str(p))
-                    elif mod not in ("CT", "RTDOSE", "RTPLAN", "RTSTRUCT", "REG"):
+                    elif mod not in ("CT", "RTDOSE", "RTPLAN", "RTSTRUCT", "REG") and sop_class not in ("1.2.840.10008.5.1.4.1.1.481.2", "1.2.840.10008.5.1.4.1.1.481.3", "1.2.840.10008.5.1.4.1.1.481.5", "1.2.840.10008.5.1.4.1.1.481.8"):
                         record_paths.append(str(p))
                 except Exception:
                     pass
@@ -164,7 +173,7 @@ async def get_plan_fields(plan_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Plan not found")
 
     dcm_dir = Path(plan.dicom_store_path)
-    rtplan_files = list(dcm_dir.glob("*.dcm"))
+    rtplan_files = [p for p in dcm_dir.rglob("*") if p.is_file() and not p.name.startswith(".")]
     if not rtplan_files:
         raise HTTPException(status_code=404, detail="DICOM files not found in store")
 
@@ -172,7 +181,9 @@ async def get_plan_fields(plan_id: int, db: Session = Depends(get_db)):
     for f in rtplan_files:
         try:
             dcm = pydicom.dcmread(str(f), stop_before_pixels=True)
-            if dcm.get("Modality", "") in ("RTPLAN", "RTIBTR"):
+            mod = str(dcm.get("Modality", "")).upper()
+            sop_class = str(getattr(dcm, "SOPClassUID", ""))
+            if (mod == "RTPLAN" or sop_class in ("1.2.840.10008.5.1.4.1.1.481.5", "1.2.840.10008.5.1.4.1.1.481.8")) and mod not in RTRECORD_MODALITIES and sop_class not in RTRECORD_SOP_CLASSES:
                 fields = parse_rtplan_fields(dcm)
                 break
         except Exception:
