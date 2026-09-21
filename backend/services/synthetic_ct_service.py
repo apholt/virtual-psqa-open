@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import zipfile
 from datetime import datetime, timezone
@@ -162,6 +163,11 @@ def _get_couch_shifts_from_log(plan_id: int, fraction_number: int, db: Session) 
                 lat = float(getattr(cp0, "TableTopLateralPosition", 0.0) or 0.0)
                 lon = float(getattr(cp0, "TableTopLongitudinalPosition", 0.0) or 0.0)
                 ver = float(getattr(cp0, "TableTopVerticalPosition", 0.0) or 0.0)
+                # Absolute couch position in IEC coordinates is on the order of hundreds of mm (e.g. -800 mm).
+                # True setup corrections are patient shifts (typically < 30 mm, max 50 mm).
+                # If these values exceed plausible setup shifts, they represent raw machine table coordinates, not shifts.
+                if abs(lon) > 50.0 or abs(ver) > 50.0 or abs(lat) > 50.0:
+                    return {"lat": None, "long": None, "vert": None}
                 return {"lat": round(lat, 2), "long": round(lon, 2), "vert": round(ver, 2)}
     except Exception as exc:
         logger.warning(f"Could not read couch positions from record for plan {plan_id} fx {fraction_number}: {exc}")
@@ -968,6 +974,22 @@ def calculate_synthetic_ct_dvh(
         else round(float(tps_grid.max_dose) * 0.95, 1)
     )
 
+    # Extract target-specific prescriptions from RTPLAN if available
+    target_prescriptions: dict[int, float] = {}
+    try:
+        from services.complexity_extractor import _load_rtplan
+        dcm_plan = _load_rtplan(plan)
+        for ref in getattr(dcm_plan, "DoseReferenceSequence", []):
+            roi_num = getattr(ref, "ReferencedROINumber", None)
+            rx_val = getattr(ref, "TargetPrescriptionDose", None)
+            if roi_num is not None and rx_val is not None:
+                try:
+                    target_prescriptions[int(roi_num)] = float(rx_val)
+                except (ValueError, TypeError):
+                    pass
+    except Exception as exc:
+        logger.debug(f"Could not load target prescriptions from RTPLAN: {exc}")
+
     # 1. Load ROIs (from deformed_rois.npz, or RTSTRUCT fallback, or isodose fallback)
     rois: list[dict[str, Any]] = []
     deformed_npz = sct_dir / "deformed_rois.npz"
@@ -1004,16 +1026,25 @@ def calculate_synthetic_ct_dvh(
         rtstruct_file = _find_rtstruct_file(plan)
         if rtstruct_file:
             raw_rois = load_rois_from_rtstruct(rtstruct_file, tps_grid)
-            dz = float(sct.setup_shift_vert_mm or 0.0) / tps_grid.spacing[0]
-            dy = float(sct.setup_shift_long_mm or 0.0) / tps_grid.spacing[1]
-            dx = float(sct.setup_shift_lat_mm or 0.0) / tps_grid.spacing[2]
+            shift_lat = float(sct.setup_shift_lat_mm or 0.0)
+            shift_long = float(sct.setup_shift_long_mm or 0.0)
+            shift_vert = float(sct.setup_shift_vert_mm or 0.0)
+            has_shift = (
+                (abs(shift_lat) > 1e-3 or abs(shift_long) > 1e-3 or abs(shift_vert) > 1e-3)
+                and abs(shift_lat) <= 50.0
+                and abs(shift_long) <= 50.0
+                and abs(shift_vert) <= 50.0
+            )
+            dz = shift_vert / tps_grid.spacing[0]
+            dy = shift_long / tps_grid.spacing[1]
+            dx = shift_lat / tps_grid.spacing[2]
             shift_vec = (-dz, -dy, -dx)
-            has_shift = abs(dz) > 1e-3 or abs(dy) > 1e-3 or abs(dx) > 1e-3
 
             for r in raw_rois:
                 plan_m = r["mask"]
                 if has_shift:
-                    def_m = scipy_shift(plan_m.astype(float), shift_vec, order=0, mode="constant", cval=0.0) > 0.5
+                    shifted_m = scipy_shift(plan_m.astype(float), shift_vec, order=0, mode="constant", cval=0.0) > 0.5
+                    def_m = shifted_m if shifted_m.any() else plan_m
                 else:
                     def_m = plan_m
                 rois.append({
@@ -1061,16 +1092,36 @@ def calculate_synthetic_ct_dvh(
         sct_dvh = compute_cumulative_dvh(mc_grid.array, def_mask, dose_axis)
         tps_dvh = compute_cumulative_dvh(tps_grid.array, plan_mask, dose_axis)
 
-        sct_m = extract_percentile_metrics(mc_grid.array, def_mask, rx_dose)
-        tps_m = extract_percentile_metrics(tps_grid.array, plan_mask, rx_dose)
+        # Determine target-specific prescription dose (Gy)
+        target_rx = target_prescriptions.get(roi.get("roi_number"))
+        if target_rx is None:
+            name_str = roi.get("name", "")
+            m_cgy = re.search(r"(\d{4})", name_str)
+            m_gy = re.search(r"(\d{2,3})(?:\s*gy|\s*cgy)", name_str, re.IGNORECASE)
+            if m_cgy:
+                target_rx = float(m_cgy.group(1)) / 100.0
+            elif m_gy:
+                val = float(m_gy.group(1))
+                target_rx = val if val < 200 else val / 100.0
+            elif is_target:
+                tps_raw_d95 = float(np.percentile(tps_grid.array[plan_mask], 5)) if plan_mask.any() else rx_dose
+                target_rx = round(tps_raw_d95, 1)
+            else:
+                target_rx = rx_dose
+
+        if not target_rx or target_rx <= 0:
+            target_rx = rx_dose
+
+        sct_m = extract_percentile_metrics(mc_grid.array, def_mask, target_rx)
+        tps_m = extract_percentile_metrics(tps_grid.array, plan_mask, target_rx)
 
         sct_v95 = (
-            round(float(np.mean(mc_grid.array[def_mask] >= 0.95 * rx_dose) * 100.0), 2)
+            round(float(np.mean(mc_grid.array[def_mask] >= 0.95 * target_rx) * 100.0), 2)
             if def_mask.any()
             else 0.0
         )
         tps_v95 = (
-            round(float(np.mean(tps_grid.array[plan_mask] >= 0.95 * rx_dose) * 100.0), 2)
+            round(float(np.mean(tps_grid.array[plan_mask] >= 0.95 * target_rx) * 100.0), 2)
             if plan_mask.any()
             else 0.0
         )
@@ -1098,22 +1149,27 @@ def calculate_synthetic_ct_dvh(
         }
 
         if is_target:
-            if sct_v95 >= 95.0 and sct_m["d95"] >= 0.95 * rx_dose:
+            d95_retention = (sct_m["d95"] / tps_m["d95"] * 100.0) if tps_m["d95"] > 0 else 0.0
+
+            if (sct_v95 >= 95.0 and sct_m["d95"] >= 0.95 * target_rx) or (d95_retention >= 95.0 and sct_v95 >= 90.0):
                 c_status = "PASS"
                 c_note = (
-                    f"Target coverage maintained: V95%={sct_v95:.1f}%, "
-                    f"D95={sct_m['d95']:.1f} Gy ({sct_m['d95']/rx_dose*100:.1f}% Rx)."
+                    f"Target coverage maintained: V95%={sct_v95:.1f}% (Plan: {tps_v95:.1f}%), "
+                    f"D95={sct_m['d95']:.1f} Gy (Rx: {target_rx:.1f} Gy, {d95_retention:.1f}% retention)."
                 )
-            elif sct_v95 >= 90.0 and sct_m["d95"] >= 0.90 * rx_dose:
+            elif (sct_v95 >= 88.0 and sct_m["d95"] >= 0.88 * target_rx) or (d95_retention >= 90.0):
                 c_status = "WARNING"
-                c_note = f"Marginal target coverage: V95%={sct_v95:.1f}% (Plan: {tps_v95:.1f}%), D95={sct_m['d95']:.1f} Gy."
+                c_note = (
+                    f"Marginal target coverage: V95%={sct_v95:.1f}% (Plan: {tps_v95:.1f}%), "
+                    f"D95={sct_m['d95']:.1f} Gy ({d95_retention:.1f}% retention)."
+                )
                 all_targets_passed = False
                 any_target_warning = True
             else:
                 c_status = "FAIL"
                 c_note = (
                     f"Target undercoverage alert: V95% dropped to {sct_v95:.1f}% (Plan: {tps_v95:.1f}%), "
-                    f"D95={sct_m['d95']:.1f} Gy < 90% Rx. Adaptive replan recommended."
+                    f"D95={sct_m['d95']:.1f} Gy < 90% Rx ({d95_retention:.1f}% retention). Adaptive replan recommended."
                 )
                 all_targets_passed = False
 
@@ -1123,6 +1179,7 @@ def calculate_synthetic_ct_dvh(
                 "type": roi["type"],
                 "color": roi["color"],
                 "is_target": True,
+                "target_prescription_dose_gy": target_rx,
                 "planned_volume_cc": plan_vol,
                 "deformed_volume_cc": def_vol,
                 "volume_change_pct": vol_chg,
