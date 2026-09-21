@@ -453,11 +453,11 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
     }
   };
 
-  const handleGenerateOnly = async () => {
+  const handleGenerate = async (autoCalculate: boolean = true) => {
     if (!selectedFraction) return;
     setGenerating(true);
     try {
-      await generateSyntheticCT(planId, selectedFraction, dirMethod, false);
+      await generateSyntheticCT(planId, selectedFraction, dirMethod, autoCalculate);
       await fetchSummaries();
       await fetchDetail(selectedFraction);
     } catch (err) {
@@ -867,7 +867,7 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
                       </div>
                     </div>
                     <button
-                      onClick={handleGenerateOnly}
+                      onClick={() => handleGenerate(true)}
                       disabled={generating}
                       className="w-full py-1.5 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-xs font-semibold rounded-md flex items-center justify-center gap-1.5 transition-colors"
                     >
@@ -922,7 +922,7 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
                   <>
                     {(detail.status === "cbct_uploaded" || (detail.status === "error" && !detail.num_slices)) && (
                       <button
-                        onClick={handleGenerateOnly}
+                        onClick={() => handleGenerate(true)}
                         disabled={generating}
                         className="w-full py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg flex items-center justify-center gap-1.5 transition-colors"
                       >

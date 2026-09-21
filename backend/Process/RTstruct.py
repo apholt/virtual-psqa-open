@@ -76,6 +76,9 @@ class RTstruct:
         Slice["XY_img"] = list(zip( ((np.array(dcm_slice.ContourData[0::3]) - CT.ImagePositionPatient[0]) / CT.PixelSpacing[0]), ((np.array(dcm_slice.ContourData[1::3]) - CT.ImagePositionPatient[1]) / CT.PixelSpacing[1]) ))
         Slice["Z_img"] = (Slice["Z_dcm"] - CT.ImagePositionPatient[2]) / CT.PixelSpacing[2]
         Slice["Slice_id"] = int(round(Slice["Z_img"]))
+
+        if Slice["Slice_id"] < 0 or Slice["Slice_id"] >= CT.GridSize[2]:
+          continue
       
         # convert polygon to mask (based on matplotlib - slow)
         #x, y = np.meshgrid(np.arange(CT.GridSize[0]), np.arange(CT.GridSize[1]))
@@ -99,7 +102,13 @@ class RTstruct:
         Contour.ContourSequence.append(Slice)
       
         # check if the contour sequence is imported on the correct CT slice:
-        if(hasattr(dcm_slice, 'ContourImageSequence') and CT.SOPInstanceUIDs[Slice["Slice_id"]] != dcm_slice.ContourImageSequence[0].ReferencedSOPInstanceUID):
+        if (
+          hasattr(dcm_slice, 'ContourImageSequence')
+          and hasattr(CT, 'SOPInstanceUIDs')
+          and CT.SOPInstanceUIDs
+          and Slice["Slice_id"] < len(CT.SOPInstanceUIDs)
+          and CT.SOPInstanceUIDs[Slice["Slice_id"]] != dcm_slice.ContourImageSequence[0].ReferencedSOPInstanceUID
+        ):
           SOPInstanceUID_match = 0
       
       if SOPInstanceUID_match != 1:

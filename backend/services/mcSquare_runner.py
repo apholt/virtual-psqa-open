@@ -346,6 +346,7 @@ def _run_worker(
         if not ct_dir_abs.is_absolute():
             ct_dir_abs = (backend_dir / ct_dir).resolve()
         cmd.extend(["--ct-dir", str(ct_dir_abs)])
+        cmd.append("--no-density-override")
 
     logger.info(
         f"Launching MCsquare worker for plan {plan_id} (prefix={dose_prefix}, force={force}): store={store} "

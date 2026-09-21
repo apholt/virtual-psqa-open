@@ -213,9 +213,9 @@ def _dispatch(job: QAJob, db, force: bool = False) -> str:
         sct = generate_synthetic_ct(plan_id, fx, db, dir_method="demons", auto_calculate=False, job_id=job.id)
         return sct.dicom_dir or ""
     if job.job_type in ("synthetic_ct_full", "synthetic_qact"):
-        from services.synthetic_ct_service import generate_synthetic_ct
+        from services.synthetic_ct_service import generate_synthetic_ct, calculate_synthetic_ct_dose
         fx = job.fraction_number or 1
         sct = generate_synthetic_ct(plan_id, fx, db, dir_method="demons", auto_calculate=False, job_id=job.id)
-        return sct.dicom_dir or ""
+        return calculate_synthetic_ct_dose(plan_id, fx, db, job_id=job.id)
     raise ValueError(f"Unsupported job type: {job.job_type}")
 
