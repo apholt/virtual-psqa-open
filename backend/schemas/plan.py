@@ -24,6 +24,13 @@ class PlanIngestionResponse(BaseModel):
     fields: list[FieldSummary]
     warnings: list[str]
     dicom_files_found: dict[str, int]
+    plan_ids: Optional[list[int]] = None
+    plans: Optional[list[dict]] = None
+    latest_plan_label: Optional[str] = None
+    is_record_only: Optional[bool] = False
+    updated_fractions: Optional[list[tuple[int, int]]] = None
+    is_all_duplicates: Optional[bool] = False
+    new_files_count: Optional[int] = 0
 
 
 class PlanSummary(BaseModel):

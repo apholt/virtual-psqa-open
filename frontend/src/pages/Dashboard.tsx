@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import toast from "react-hot-toast";
 import {
@@ -8,6 +8,7 @@ import {
   Play,
   Trash2,
   ChevronRight,
+  ChevronDown,
   Upload,
   Search,
   Filter,
@@ -20,6 +21,7 @@ import type { ActionRow, DashboardData, PatientWithLatestPlan, QAStatus } from "
 import { Topbar } from "../components/Topbar";
 import { StatusBadge } from "../components/StatusBadge";
 import { UploadModal } from "../components/UploadModal";
+import { UploadRecordModal } from "../components/UploadRecordModal";
 import { OrthancImportModal } from "../components/OrthancImportModal";
 import { C, gateStyle, btnStyle } from "../theme";
 
@@ -174,11 +176,18 @@ export function Dashboard() {
   // Patient Worklist data
   const [patients, setPatients] = useState<PatientWithLatestPlan[]>([]);
   const [patientsLoading, setPatientsLoading] = useState(true);
+  const [expandedPatients, setExpandedPatients] = useState<Record<number, boolean>>({});
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [siteFilter, setSiteFilter] = useState("");
   const [showUpload, setShowUpload] = useState(false);
+  const [showRecordUpload, setShowRecordUpload] = useState(false);
   const [showOrthanc, setShowOrthanc] = useState(false);
+
+  const togglePatientExpand = useCallback((patientId: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpandedPatients((prev) => ({ ...prev, [patientId]: !prev[patientId] }));
+  }, []);
 
   const esRef = useRef<EventSource | null>(null);
 
@@ -447,6 +456,13 @@ export function Dashboard() {
                 <Server size={13} /> Orthanc PACS
               </button>
               <button
+                onClick={() => setShowRecordUpload(true)}
+                style={{ ...btnStyle, fontSize: 11, padding: "5px 10px", background: "rgba(16, 185, 129, 0.1)", borderColor: "rgba(16, 185, 129, 0.3)", color: "#34d399", fontWeight: 500 }}
+                title="Upload RT Treatment Record (.dcm or .zip) with or without an accompanied plan"
+              >
+                <Upload size={13} /> Upload RT record
+              </button>
+              <button
                 onClick={() => setShowUpload(true)}
                 style={{ ...btnStyle, fontSize: 11, padding: "5px 10px", background: C.passBg, borderColor: C.barPass, color: C.passText, fontWeight: 500 }}
               >
@@ -669,6 +685,19 @@ export function Dashboard() {
                 <Server size={14} /> Import from Orthanc
               </button>
               <button
+                onClick={() => setShowRecordUpload(true)}
+                style={{
+                  ...btnStyle,
+                  background: "rgba(16, 185, 129, 0.1)",
+                  borderColor: "rgba(16, 185, 129, 0.3)",
+                  color: "#34d399",
+                  fontWeight: 600,
+                  fontSize: 12,
+                }}
+              >
+                <Upload size={14} /> Upload RT record
+              </button>
+              <button
                 onClick={() => setShowUpload(true)}
                 style={{
                   ...btnStyle,
@@ -812,63 +841,163 @@ export function Dashboard() {
                     </td>
                   </tr>
                 ) : (
-                  patients.map((p) => (
-                    <tr
-                      key={p.id}
-                      onClick={() => navigate(`/patients/${p.id}/plans`)}
-                      style={{
-                        cursor: "pointer",
-                        borderBottom: `0.5px solid ${C.border}`,
-                        transition: "background 0.1s",
-                      }}
-                      onMouseEnter={(e) => (e.currentTarget.style.background = C.pageBg)}
-                      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                    >
-                      <td
-                        style={{
-                          padding: "8px 8px 8px 0",
-                          fontFamily: "monospace",
-                          fontSize: 11,
-                          fontWeight: 600,
-                          color: C.text,
-                        }}
-                      >
-                        {p.patient_id}
-                      </td>
-                      <td style={{ padding: "8px 8px 8px 0", fontWeight: 500, color: C.text }}>
-                        {p.patient_name || "—"}
-                      </td>
-                      <td style={{ padding: "8px 8px 8px 0", color: C.muted }}>
-                        {p.latest_plan_site || "—"}
-                      </td>
-                      <td style={{ padding: "8px 8px 8px 0", color: C.text }}>
-                        {p.latest_plan_label || "—"}
-                      </td>
-                      <td style={{ padding: "8px 8px 8px 0", color: C.muted, textAlign: "center" }}>
-                        {p.number_of_fields ?? "—"}
-                      </td>
-                      <td style={{ padding: "8px 8px 8px 0" }}>
-                        <StatusBadge status={p.qa_status as QAStatus} />
-                      </td>
-                      <td style={{ padding: "8px 8px 8px 0", color: C.muted, fontSize: 11 }}>
-                        {p.days_since_created === 0 ? "Today" : `${p.days_since_created}d ago`}
-                      </td>
-                      <td style={{ padding: "8px 0", textAlign: "right" }}>
-                        <span
+                  patients.map((p) => {
+                    const isMultiPlan = (p.plan_count ?? (p.plans?.length ?? 1)) > 1;
+                    const isExpanded = !!expandedPatients[p.id];
+                    return (
+                      <Fragment key={p.id}>
+                        <tr
+                          onClick={() => navigate(`/patients/${p.id}/plans`)}
                           style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 4,
-                            fontSize: 11.5,
-                            color: "#3b82f6",
-                            fontWeight: 500,
+                            cursor: "pointer",
+                            borderBottom: isExpanded ? "none" : `0.5px solid ${C.border}`,
+                            transition: "background 0.1s",
                           }}
+                          onMouseEnter={(e) => (e.currentTarget.style.background = C.pageBg)}
+                          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                         >
-                          View <ArrowRight size={12} />
-                        </span>
-                      </td>
-                    </tr>
-                  ))
+                          <td
+                            style={{
+                              padding: "8px 8px 8px 0",
+                              fontFamily: "monospace",
+                              fontSize: 11,
+                              fontWeight: 600,
+                              color: C.text,
+                            }}
+                          >
+                            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                              {isMultiPlan ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => togglePatientExpand(p.id, e)}
+                                  style={{
+                                    border: "none",
+                                    background: "transparent",
+                                    cursor: "pointer",
+                                    padding: 2,
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    color: C.muted,
+                                  }}
+                                  title={isExpanded ? "Collapse beamsets" : "Expand beamsets"}
+                                >
+                                  {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                                </button>
+                              ) : (
+                                <span style={{ width: 17 }} />
+                              )}
+                              <span>{p.patient_id}</span>
+                            </div>
+                          </td>
+                          <td style={{ padding: "8px 8px 8px 0", fontWeight: 500, color: C.text }}>
+                            {p.patient_name || "—"}
+                          </td>
+                          <td style={{ padding: "8px 8px 8px 0", color: C.muted }}>
+                            {p.latest_plan_site || "—"}
+                          </td>
+                          <td style={{ padding: "8px 8px 8px 0", color: C.text }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <span>{p.latest_plan_label || "—"}</span>
+                              {isMultiPlan && (
+                                <span
+                                  onClick={(e) => togglePatientExpand(p.id, e)}
+                                  style={{
+                                    fontSize: 10,
+                                    fontWeight: 600,
+                                    padding: "1px 6px",
+                                    borderRadius: 10,
+                                    background: "#e0e7ff",
+                                    color: "#3730a3",
+                                    cursor: "pointer",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                  title="Click to toggle beamsets"
+                                >
+                                  {p.plan_count} beamsets
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td style={{ padding: "8px 8px 8px 0", color: C.muted, textAlign: "center" }}>
+                            {p.number_of_fields ?? "—"}
+                          </td>
+                          <td style={{ padding: "8px 8px 8px 0" }}>
+                            <StatusBadge status={p.qa_status as QAStatus} />
+                          </td>
+                          <td style={{ padding: "8px 8px 8px 0", color: C.muted, fontSize: 11 }}>
+                            {p.days_since_created === 0 ? "Today" : `${p.days_since_created}d ago`}
+                          </td>
+                          <td style={{ padding: "8px 0", textAlign: "right" }}>
+                            <span
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: 4,
+                                fontSize: 11.5,
+                                color: "#3b82f6",
+                                fontWeight: 500,
+                              }}
+                            >
+                              {isMultiPlan ? "All plans" : "View"} <ArrowRight size={12} />
+                            </span>
+                          </td>
+                        </tr>
+                        {isMultiPlan && isExpanded && p.plans?.map((sub) => (
+                          <tr
+                            key={`sub-${sub.id}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate(`/plans/${sub.id}`);
+                            }}
+                            style={{
+                              cursor: "pointer",
+                              background: "#f8fafc",
+                              borderBottom: `0.5px solid ${C.border}`,
+                              fontSize: 11.5,
+                            }}
+                            onMouseEnter={(e) => (e.currentTarget.style.background = "#f1f5f9")}
+                            onMouseLeave={(e) => (e.currentTarget.style.background = "#f8fafc")}
+                          >
+                            <td style={{ padding: "6px 8px 6px 20px", color: C.muted, fontFamily: "monospace", fontSize: 10.5 }}>
+                              ↳ Beamset
+                            </td>
+                            <td style={{ padding: "6px 8px 6px 0", color: C.muted }}>
+                              {sub.plan_name || p.patient_name}
+                            </td>
+                            <td style={{ padding: "6px 8px 6px 0", color: C.muted }}>
+                              {sub.treatment_site || p.latest_plan_site || "—"}
+                            </td>
+                            <td style={{ padding: "6px 8px 6px 0", fontWeight: 600, color: C.text }}>
+                              {sub.plan_label}
+                            </td>
+                            <td style={{ padding: "6px 8px 6px 0", color: C.muted, textAlign: "center" }}>
+                              {sub.number_of_fields}
+                            </td>
+                            <td style={{ padding: "6px 8px 6px 0" }}>
+                              <StatusBadge status={sub.qa_status as QAStatus} />
+                            </td>
+                            <td style={{ padding: "6px 8px 6px 0", color: C.muted, fontSize: 10.5 }}>
+                              {new Date(sub.created_at).toLocaleDateString()}
+                            </td>
+                            <td style={{ padding: "6px 0", textAlign: "right" }}>
+                              <span
+                                style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: 3,
+                                  fontSize: 11,
+                                  color: "#3b82f6",
+                                  fontWeight: 500,
+                                }}
+                              >
+                                View QA <ArrowRight size={11} />
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </Fragment>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -882,7 +1011,26 @@ export function Dashboard() {
           onClose={() => setShowUpload(false)}
           onSuccess={(result) => {
             setShowUpload(false);
-            toast.success(`Plan ingested: ${result.plan_label}`);
+            if (result.is_record_only || (result.dicom_files_found?.RTRECORD && !result.dicom_files_found?.RTPLAN)) {
+              toast.success(`RT Record ingested: ${result.plan_label}`);
+            } else {
+              toast.success(`Plan ingested: ${result.plan_label}`);
+            }
+            refreshAll();
+            navigate(`/plans/${result.plan_id}`);
+          }}
+        />
+      )}
+
+      {/* RT Record Upload Modal */}
+      {showRecordUpload && (
+        <UploadRecordModal
+          onClose={() => setShowRecordUpload(false)}
+          onSuccess={(result) => {
+            setShowRecordUpload(false);
+            toast.success(
+              result.warnings?.[0] || `RT Record ingested: ${result.plan_label}`
+            );
             refreshAll();
             navigate(`/plans/${result.plan_id}`);
           }}

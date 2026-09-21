@@ -95,6 +95,20 @@ def _latest_job_result(plan_id: int, job_type: str, db: Session) -> Optional[str
     )
     if job and job.result_path and Path(job.result_path).exists():
         return job.result_path
+    # Fallback for stopped/cancelled jobs with partial result
+    job_partial = (
+        db.query(QAJob)
+        .filter_by(plan_id=plan_id, job_type=job_type, status="cancelled")
+        .order_by(QAJob.id.desc())
+        .first()
+    )
+    if job_partial and job_partial.result_path and Path(job_partial.result_path).exists():
+        return job_partial.result_path
+    # Fallback for mcSquare: check if mc_dose.npz exists in standard output dir
+    if job_type == "mcSquare":
+        default_mc = _mc_output_dir(plan_id) / "mc_dose.npz"
+        if default_mc.is_file():
+            return str(default_mc)
     return None
 
 

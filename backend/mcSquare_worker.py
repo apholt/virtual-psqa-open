@@ -76,11 +76,13 @@ def parse_args():
     p.add_argument("--exe", default="MCsquare_win_avx2.exe", help="MCsquare executable name in install-dir")
     p.add_argument("--ct-dir", default=None, help="override folder containing synthetic CT DICOM series")
     p.add_argument("--dose-prefix", default="mc_dose", help="base filename for output dose npz files")
-    p.add_argument("--plan-uid", default=None, help="target RT Plan SOPInstanceUID")
 
+    p.add_argument("--force", action="store_true",
+                   help="force re-simulation of all beams, ignoring existing cached beam doses")
     p.add_argument("--enable-override", action="store_true", help="apply RTStruct water overrides (legacy)")
     p.add_argument("--no-density-override", action="store_true",
                    help="skip applying RTSTRUCT REL_ELEC_DENSITY overrides (couch etc.) to the CT")
+    p.add_argument("--plan-uid", default=None, help="SOPInstanceUID of specific RT Ion Plan to simulate")
     return p.parse_args()
 
 
@@ -183,24 +185,27 @@ def main():
         sys.exit(2)
     if n_ct > 1:
         log(f"WARNING: {n_ct} CT series present — using the first")
-    if args.plan_uid and len(patient.Plans) > 1:
-        target_plan = None
+    Plan = None
+    if getattr(args, "plan_uid", None):
         import pydicom
         for p in patient.Plans:
             try:
-                d = pydicom.dcmread(p.DcmFile, stop_before_pixels=True)
-                if str(getattr(d, "SOPInstanceUID", "")) == args.plan_uid:
-                    target_plan = p
-                    break
+                p_file = getattr(p, "DcmFile", None)
+                if p_file:
+                    ds = pydicom.dcmread(str(p_file), stop_before_pixels=True, force=True)
+                    if str(getattr(ds, "SOPInstanceUID", "")) == args.plan_uid:
+                        Plan = p
+                        log(f"Matched plan UID {args.plan_uid}: {p_file}")
+                        break
             except Exception:
                 pass
-        if target_plan is not None:
-            log(f"Matched target plan UID {args.plan_uid}: '{target_plan.PlanName}'")
-            patient.Plans = [target_plan]
-        else:
-            log(f"WARNING: Plan UID {args.plan_uid} not matched among plans; keeping first")
-    elif n_plan > 1:
-        log(f"WARNING: {n_plan} plans present — using the first")
+    if Plan is None:
+        if n_plan > 1:
+            log(f"WARNING: {n_plan} plans present — using the first")
+        Plan = patient.Plans[0]
+
+    # Retain only the chosen plan so only that plan is loaded & simulated
+    patient.Plans = [Plan]
 
     # We only need CT (+ struct for density overrides); skip TPS dose loading.
     patient.RTdoses = []
@@ -212,6 +217,7 @@ def main():
     patient.import_patient_data()
 
     CT = patient.CTimages[0]
+    # Plan is now patient.Plans[0] after import_patient_data
     Plan = patient.Plans[0]
     if not getattr(Plan, "isLoaded", 0):
         emit("ERROR", "plan failed to load (not a supported PBS ion plan?)")
@@ -275,24 +281,115 @@ def main():
                     f"continuing on raw CT (posterior beams may be inaccurate)")
                 traceback.print_exc()
 
-    # ------------------------------------------------------- build MCsquare input
-    log("building MCsquare input (CT.mhd, PlanPencil.txt, config.txt)")
+    # ------------------------------------------------------------- geometry & helpers
+    ps = CT.PixelSpacing
+    ipp = CT.ImagePositionPatient
+    spacing = np.asarray((ps[2], ps[1], ps[0]), dtype=np.float64)
+    origin = np.asarray((ipp[2], ipp[1], ipp[0]), dtype=np.float64)
+
+    def mhd_to_arr(mhd, sub_plan):
+        """MCsquare MHD physical dose -> CT-aligned, RBE-weighted DoseGrid array
+        (n_z, n_y, n_x), Gy(RBE). The clinical TPS RTDose is EFFECTIVE
+        (RBE-weighted), so we scale physical dose by --rbe to compare like-for-like."""
+        rtd = RTdose().Initialize_from_MHD(mc2.DoseName, mhd, CT, sub_plan)
+        arr = np.transpose(rtd.Image, (2, 0, 1)).astype(np.float32)
+        return arr * np.float32(args.rbe)
+
+    def save_npz(arr, out_path: Path):
+        tmp_path = out_path.with_suffix(".tmp.npz")
+        np.savez_compressed(tmp_path, array=arr, spacing=spacing, origin=origin)
+        tmp_path.replace(out_path)
+
+    def is_valid_npz(path: Path) -> bool:
+        if not path.is_file():
+            return False
+        try:
+            with np.load(path) as data:
+                return "array" in data and data["array"].size > 0
+        except Exception:
+            return False
+
+    # --------------------------------------------------- beam numbering mapping
+    # MCsquare numbers sub-plans 1..N in IonBeamSequence order, but the TPS
+    # beam-level RTDose files carry the plan's own BeamNumber, which need not
+    # start at 1. When the two disagree, services/gamma_analysis.py finds no
+    # common beam numbers and falls back to a summed-dose comparison, losing
+    # per-beam gamma. Recover the plan's numbering so the two line up.
+    plan_beam_numbers = []
+    try:
+        import pydicom  # local: pydicom is not imported at module scope
+        _pd = pydicom.dcmread(str(Plan.DcmFile), force=True)
+        for _b in _pd.IonBeamSequence:
+            if getattr(_b, "TreatmentDeliveryType", "TREATMENT") != "TREATMENT":
+                continue
+            plan_beam_numbers.append(int(_b.BeamNumber))
+    except Exception as exc:  # noqa: BLE001
+        log(f"WARNING: could not read plan beam numbers ({exc}); "
+            f"falling back to sequential numbering")
+        plan_beam_numbers = []
+    if len(plan_beam_numbers) != n_beams:
+        if plan_beam_numbers:
+            log(f"WARNING: plan has {len(plan_beam_numbers)} TREATMENT beam(s) "
+                f"but MCsquare has {n_beams}; using sequential numbering")
+        plan_beam_numbers = list(range(1, n_beams + 1))
+    else:
+        log(f"beam numbering: MCsquare 1..{n_beams} -> plan {plan_beam_numbers}")
+
+    # --------------------------------------------------- check cache & force flag
+    if args.force:
+        log("Force flag set: clearing cached beam and summed dose files")
+        for f in output_dir.glob(f"{args.dose_prefix}_beam*.npz"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        summed_file = output_dir / f"{args.dose_prefix}.npz"
+        if summed_file.exists():
+            try:
+                summed_file.unlink()
+            except Exception:
+                pass
+
+    summed = None
+    beams_to_simulate = []
+    cached_count = 0
+
+    for i in range(n_beams):
+        beam_no = plan_beam_numbers[i]
+        beam_path = output_dir / f"{args.dose_prefix}_beam{beam_no}.npz"
+        if not args.force and is_valid_npz(beam_path):
+            with np.load(beam_path) as data:
+                arr_b = data["array"].astype(np.float32)
+            summed = arr_b.copy() if summed is None else summed + arr_b
+            cached_count += 1
+            log(f"beam {beam_no} (field {i + 1}/{n_beams}) found in cache "
+                f"(max={float(arr_b.max()):.4f} Gy) — skipping simulation")
+            emit("RESULT_BEAM", beam_no, beam_path)
+        else:
+            beams_to_simulate.append(i)
+
+    summed_path = output_dir / f"{args.dose_prefix}.npz"
+    if cached_count > 0 and summed is not None:
+        save_npz(summed, summed_path)
+        emit("RESULT_SUMMED", summed_path)
+
+    if not beams_to_simulate:
+        log(f"All {n_beams} beams already computed in {output_dir} — done!")
+        progress(1.0)
+        emit("DONE")
+        return
+
+    log(f"Need simulation for {len(beams_to_simulate)}/{n_beams} beams "
+        f"({cached_count} loaded from cache)")
+
+    # ------------------------------------------------------- build MCsquare CT input
+    log("building MCsquare input (CT.mhd, BDL)")
     mc2.init_simulation_directory()
     mc2.export_CT_for_MCsquare(CT, os.path.join(mc2.WorkDir, "CT.mhd"), mc2.Crop_CT_contour)
     mc2.BDL.import_BDL()
-    # real-CT isocenter transform (with the Y-flip) — the actual fix
-    export_plan_for_MCsquare(Plan, os.path.join(mc2.WorkDir, "PlanPencil.txt"), CT, mc2.BDL)
-    log(f"DeliveredProtons={Plan.DeliveredProtons:.4e}")
-
-    mc2.config = generate_MCsquare_config(
-        mc2.WorkDir, mc2.NumProtons, mc2.Scanner.get_path(), mc2.BDL.get_path(),
-        "CT.mhd", "PlanPencil.txt", True,     # AnalyzeIndividualFields=True -> Export_Beam_dose
-    )
-    mc2.config["Stat_uncertainty"] = mc2.MaxUncertainty
-    export_MCsquare_config(mc2.config)
     progress(0.12)
 
-    # ------------------------------------------------------------------ run exe
+    # ------------------------------------------------------------------ resolve exe
     is_win = platform.system().lower() == "windows"
 
     def _is_compatible(p: Path) -> bool:
@@ -353,139 +450,119 @@ def main():
     env = os.environ.copy()
     env["MCsquare_Materials_Dir"] = str(install_dir / "Materials")
 
-    log(f"running {exe.name} (cwd={mc2.WorkDir})")
-    child = subprocess.Popen(
-        [str(exe), "config.txt"],
-        cwd=mc2.WorkDir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        env=env,
-    )
+    # ----------------------------------------------- incremental beam-by-beam loop
+    import copy
+    import re
     import signal
+    pct_re = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
 
-    def _on_signal(signum, frame):
-        if child.poll() is None:
+    for sim_step, i in enumerate(beams_to_simulate):
+        beam_no = plan_beam_numbers[i]
+        beam_path = output_dir / f"{args.dose_prefix}_beam{beam_no}.npz"
+        log(f"--- Simulating beam {beam_no} (field {i + 1}/{n_beams}) ---")
+
+        # Sub-plan isolating just this beam
+        sub_plan = copy.copy(Plan)
+        sub_plan.Beams = [Plan.Beams[i]]
+
+        # Clean WorkDir Outputs folder to ensure no stale MHD files are read
+        outputs_dir = Path(mc2.WorkDir) / "Outputs"
+        if outputs_dir.exists():
+            for f in outputs_dir.glob("Dose*"):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+
+        # Export PlanPencil.txt for this sub-plan (computes sub_plan.DeliveredProtons)
+        plan_pencil_path = os.path.join(mc2.WorkDir, "PlanPencil.txt")
+        export_plan_for_MCsquare(sub_plan, plan_pencil_path, CT, mc2.BDL)
+        log(f"Beam {beam_no}: DeliveredProtons={sub_plan.DeliveredProtons:.4e}")
+
+        # Generate config for this beam
+        mc2.config = generate_MCsquare_config(
+            mc2.WorkDir, mc2.NumProtons, mc2.Scanner.get_path(), mc2.BDL.get_path(),
+            "CT.mhd", "PlanPencil.txt", True,     # AnalyzeIndividualFields=True -> Export_Beam_dose
+        )
+        mc2.config["Stat_uncertainty"] = mc2.MaxUncertainty
+        export_MCsquare_config(mc2.config)
+
+        # Progress budget: 0.12 .. 0.95 split across all n_beams
+        beam_base = 0.12 + 0.83 * (i / n_beams)
+        beam_span = 0.83 / n_beams
+
+        log(f"running {exe.name} for beam {beam_no} (cwd={mc2.WorkDir})")
+        child = subprocess.Popen(
+            [str(exe), "config.txt"],
+            cwd=mc2.WorkDir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+
+        def _on_signal(signum, frame):
+            if child.poll() is None:
+                try:
+                    child.terminate()
+                except Exception:
+                    pass
+            sys.exit(130)
+
+        old_sigterm = signal.signal(signal.SIGTERM, _on_signal)
+        old_sigint = signal.signal(signal.SIGINT, _on_signal)
+        try:
+            for line in child.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                emit("LOG", f"mc2[b{beam_no}]| " + line)
+                m = pct_re.search(line)
+                if m:
+                    pct = min(float(m.group(1)), 100.0) / 100.0
+                    frac = beam_base + beam_span * pct
+                    progress(frac)
+            ret = child.wait()
+        finally:
             try:
-                child.terminate()
+                signal.signal(signal.SIGTERM, old_sigterm)
+                signal.signal(signal.SIGINT, old_sigint)
             except Exception:
                 pass
-        sys.exit(130)
+            if child.poll() is None:
+                child.terminate()
 
-    old_sigterm = signal.signal(signal.SIGTERM, _on_signal)
-    old_sigint = signal.signal(signal.SIGINT, _on_signal)
-    try:
-        import re
-        pct_re = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
-        for line in child.stdout:
-            line = line.rstrip()
-            if not line:
-                continue
-            emit("LOG", "mc2| " + line)
-            m = pct_re.search(line)
-            if m:
-                # map exe 0-100% into the 0.12..0.90 band
-                frac = 0.12 + 0.78 * (min(float(m.group(1)), 100.0) / 100.0)
-                progress(frac)
-        ret = child.wait()
-    finally:
-        try:
-            signal.signal(signal.SIGTERM, old_sigterm)
-            signal.signal(signal.SIGINT, old_sigint)
-        except Exception:
-            pass
-        if child.poll() is None:
-            child.terminate()
-    if ret != 0:
-        emit("ERROR", f"MCsquare exited with code {ret}")
-        sys.exit(3)
-    progress(0.90)
-
-    # ------------------------------------------------------------- read doses
-    # geometry (CT grid) is shared by every dose we write
-    ps = CT.PixelSpacing
-    ipp = CT.ImagePositionPatient
-    spacing = np.asarray((ps[2], ps[1], ps[0]), dtype=np.float64)
-    origin = np.asarray((ipp[2], ipp[1], ipp[0]), dtype=np.float64)
-
-    def mhd_to_arr(mhd):
-        """MCsquare MHD physical dose -> CT-aligned, RBE-weighted DoseGrid array
-        (n_z, n_y, n_x), Gy(RBE). The clinical TPS RTDose is EFFECTIVE
-        (RBE-weighted), so we scale physical dose by --rbe to compare like-for-like."""
-        rtd = RTdose().Initialize_from_MHD(mc2.DoseName, mhd, CT, Plan)
-        arr = np.transpose(rtd.Image, (2, 0, 1)).astype(np.float32)
-        return arr * np.float32(args.rbe)
-
-    def save_npz(arr, out_path):
-        np.savez_compressed(out_path, array=arr, spacing=spacing, origin=origin)
-
-    # MCsquare with Export_Beam_dose=True writes Dose_Beam{N}.mhd but NO summed
-    # Dose.mhd — so read the per-beam doses and sum them for the composite.
-    # MC_BEAM_NUMBERS_V1 ---------------------------------------------------
-    # MCsquare numbers sub-plans 1..N in IonBeamSequence order, but the TPS
-    # beam-level RTDose files carry the plan's own BeamNumber, which need not
-    # start at 1. When the two disagree, services/gamma_analysis.py finds no
-    # common beam numbers and falls back to a summed-dose comparison, losing
-    # per-beam gamma. Recover the plan's numbering so the two line up.
-    #
-    # RTplan.py builds Plan.Beams by iterating IonBeamSequence and skipping
-    # any beam whose TreatmentDeliveryType is not "TREATMENT", so the same
-    # filter in the same order reproduces the mapping exactly.
-    plan_beam_numbers = []
-    try:
-        import pydicom  # local: pydicom is not imported at module scope
-        _pd = pydicom.dcmread(str(Plan.DcmFile), force=True)
-        for _b in _pd.IonBeamSequence:
-            if getattr(_b, "TreatmentDeliveryType", "TREATMENT") != "TREATMENT":
-                continue
-            plan_beam_numbers.append(int(_b.BeamNumber))
-    except Exception as exc:  # noqa: BLE001
-        log(f"WARNING: could not read plan beam numbers ({exc}); "
-            f"falling back to sequential numbering")
-        plan_beam_numbers = []
-    if len(plan_beam_numbers) != n_beams:
-        if plan_beam_numbers:
-            log(f"WARNING: plan has {len(plan_beam_numbers)} TREATMENT beam(s) "
-                f"but MCsquare ran {n_beams}; using sequential numbering")
-        plan_beam_numbers = list(range(1, n_beams + 1))
-    else:
-        log(f"beam numbering: MCsquare 1..{n_beams} -> plan "
-            f"{plan_beam_numbers}")
-
-    log(f"reading {n_beams} per-beam doses")
-    summed = None
-    n_read = 0
-    for n in range(1, n_beams + 1):
-        beam_no = plan_beam_numbers[n - 1]
-        fname = f"Dose_Beam{n}.mhd"
-        mhd_b = mc2.import_MCsquare_dose(Plan, fname, args.dose_scaling)
-        if mhd_b is None:
-            log(f"WARNING: {fname} not found — skipping beam {n}")
-            continue
-        arr_b = mhd_to_arr(mhd_b)
-        beam_path = output_dir / f"{args.dose_prefix}_beam{beam_no}.npz"
-        save_npz(arr_b, beam_path)
-        log(f"beam {beam_no} (MCsquare sub-plan {n}) dose "
-            f"max={float(arr_b.max()):.4f} Gy(RBE={args.rbe:g})")
-        emit("RESULT_BEAM", beam_no, beam_path)
-        summed = arr_b.copy() if summed is None else summed + arr_b
-        n_read += 1
-        progress(0.90 + 0.08 * (n / n_beams))
-
-    if summed is None:
-        # fallback: some builds/configs do emit a summed Dose.mhd
-        log("no per-beam doses found — trying summed Dose.mhd")
-        mhd_sum = mc2.import_MCsquare_dose(Plan, "Dose.mhd", args.dose_scaling)
-        if mhd_sum is None:
-            emit("ERROR", "MCsquare produced neither per-beam nor summed dose")
+        if ret != 0:
+            emit("ERROR", f"MCsquare exited with code {ret} on beam {beam_no}")
             sys.exit(3)
-        summed = mhd_to_arr(mhd_sum)
 
-    summed_path = output_dir / f"{args.dose_prefix}.npz"
-    save_npz(summed, summed_path)
-    log(f"summed dose ({n_read} beams) max={float(summed.max()):.4f} Gy shape={summed.shape}")
-    emit("RESULT_SUMMED", summed_path)
+        # Read the resulting dose MHD (scaled to Gy by sub_plan.DeliveredProtons)
+        mhd_b = mc2.import_MCsquare_dose(sub_plan, "Dose_Beam1.mhd", args.dose_scaling)
+        if mhd_b is None:
+            mhd_b = mc2.import_MCsquare_dose(sub_plan, "Dose.mhd", args.dose_scaling)
+        if mhd_b is None:
+            emit("ERROR", f"MCsquare produced no dose output for beam {beam_no}")
+            sys.exit(3)
+
+        arr_b = mhd_to_arr(mhd_b, sub_plan)
+        save_npz(arr_b, beam_path)
+        emit("RESULT_BEAM", beam_no, beam_path)
+
+        # Update running composite dose atomically
+        summed = arr_b.copy() if summed is None else summed + arr_b
+        save_npz(summed, summed_path)
+        emit("RESULT_SUMMED", summed_path)
+
+        log(f"beam {beam_no} completed: max={float(arr_b.max()):.4f} Gy(RBE={args.rbe:g}) "
+            f"— composite updated ({i + 1}/{n_beams} beams)")
+        progress(0.12 + 0.83 * ((i + 1) / n_beams))
+
+    # All simulated beams finished
+    if summed is not None:
+        save_npz(summed, summed_path)
+        log(f"All {n_beams} beams complete! Summed dose max={float(summed.max()):.4f} Gy shape={summed.shape}")
+        emit("RESULT_SUMMED", summed_path)
 
     # Preserve any native openMCsquare DVH outputs from Outputs/
     outputs_dir = Path(mc2.WorkDir) / "Outputs"

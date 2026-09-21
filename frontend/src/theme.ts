@@ -60,7 +60,7 @@ export type GateStatusKey =
   | "cleared" | "verified"
   | "investigate" | "incomplete"
   | "measure" | "escalate"
-  | "pending" | "running" | "failed";
+  | "pending" | "pending_plan" | "running" | "failed";
 
 export interface StatusStyle {
   label: string;
@@ -70,15 +70,16 @@ export interface StatusStyle {
 }
 
 export const GATE_BADGE: Record<GateStatusKey, StatusStyle> = {
-  cleared:     { label: "Cleared",     bg: C.passBg,    fg: C.passText },
-  verified:    { label: "Verified",    bg: C.passBg,    fg: C.passText },
-  investigate: { label: "Investigate", bg: C.flagBg,    fg: C.flagText },
-  incomplete:  { label: "Incomplete",  bg: C.track,     fg: C.muted },
-  measure:     { label: "Measure",     bg: C.measureBg, fg: C.measureText },
-  escalate:    { label: "Escalate",    bg: C.measureBg, fg: C.measureText },
-  pending:     { label: "Pending",     bg: C.pendBg,    fg: C.pendText },
-  running:     { label: "Running",     bg: C.runBg,     fg: C.runText, pulse: true },
-  failed:      { label: "Failed",      bg: C.measureBg, fg: C.measureText },
+  cleared:      { label: "Cleared",       bg: C.passBg,                  fg: C.passText },
+  verified:     { label: "Verified",      bg: C.passBg,                  fg: C.passText },
+  investigate:  { label: "Investigate",   bg: C.flagBg,                  fg: C.flagText },
+  incomplete:   { label: "Incomplete",    bg: C.track,                   fg: C.muted },
+  measure:      { label: "Measure",       bg: C.measureBg,               fg: C.measureText },
+  escalate:     { label: "Escalate",      bg: C.measureBg,               fg: C.measureText },
+  pending:      { label: "Pending",       bg: C.pendBg,                  fg: C.pendText },
+  pending_plan: { label: "Awaiting Plan", bg: "rgba(234, 179, 8, 0.15)", fg: "#eab308" },
+  running:      { label: "Running",       bg: C.runBg,                   fg: C.runText, pulse: true },
+  failed:       { label: "Failed",        bg: C.measureBg,               fg: C.measureText },
 };
 
 /** Never let an unrecognised status break a table or badge. */

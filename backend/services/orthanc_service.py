@@ -750,7 +750,11 @@ def import_rtrecords_from_orthanc(
         if not dcm_files:
             raise ValueError("No valid DICOM files downloaded from the specified RT Record series.")
 
-        result = ingest_rtrecord_files(dcm_files, db)
+        result = ingest_rtrecord_files(dcm_files, db, target_plan_id=plan_id)
+        if settings.PIPELINE_AUTO_RUN:
+            from services.pipeline import run_stage2
+            for pid, fx in result.get("updated_fractions", []):
+                run_stage2(pid, fx, background=True)
         return result
 
 

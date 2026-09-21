@@ -58,7 +58,12 @@ export function UploadModal({ onClose, onSuccess }: Props) {
       <div className="bg-clinical-surface border border-clinical-border rounded-xl w-full max-w-lg mx-4 shadow-2xl">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-clinical-border">
-          <h2 className="text-base font-semibold text-clinical-text">Upload DICOM plan</h2>
+          <div>
+            <h2 className="text-base font-semibold text-clinical-text">Upload DICOM Files</h2>
+            <p className="text-[11px] text-clinical-muted mt-0.5">
+              Supports RTPlan, RTDose, RTStruct, CT scans, and RT Records (standalone or accompanied).
+            </p>
+          </div>
           <button
             onClick={onClose}
             className="text-clinical-muted hover:text-clinical-text transition-colors"
@@ -91,7 +96,7 @@ export function UploadModal({ onClose, onSuccess }: Props) {
               ref={inputRef}
               type="file"
               multiple
-              accept=".dcm,.zip"
+              accept=".dcm,.DCM,.zip"
               className="hidden"
               onChange={(e) => addFiles(e.target.files)}
             />

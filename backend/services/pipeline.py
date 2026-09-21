@@ -251,6 +251,24 @@ def _stage1(plan_id: int) -> None:
     verdict = decision.status.value if decision else "n/a"
     logger.info(f"[Stage 1] complete for plan {plan_id} -> gate={verdict}")
 
+    # Auto-trigger Stage 2 for any fractions with uploaded records awaiting evaluation
+    try:
+        db = SessionLocal()
+        from models.fraction import Fraction
+        fractions_to_run = (
+            db.query(Fraction)
+            .filter_by(plan_id=plan_id)
+            .filter(Fraction.rtrecord_path.isnot(None))
+            .filter(Fraction.qa_status.in_(["pending", "running"]))
+            .all()
+        )
+        for frac in fractions_to_run:
+            logger.info(f"[Stage 1] Auto-triggering Stage 2 for fraction {frac.fraction_number} of plan {plan_id}")
+            run_stage2(plan_id, frac.fraction_number, background=True)
+        db.close()
+    except Exception as exc:
+        logger.warning(f"Could not trigger Stage 2 for plan {plan_id}: {exc}")
+
 
 def run_stage1(plan_id: int, background: bool = True) -> None:
     """Kick off the Stage 1 pipeline (optionally on a daemon thread)."""

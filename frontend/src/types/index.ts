@@ -10,6 +10,7 @@ export type QAStatus =
   | "measure"
   | "escalate"
   | "pending"
+  | "pending_plan"
   | "running"
   | "failed";
 
@@ -34,6 +35,11 @@ export interface PlanIngestionResponse {
   fields: FieldSummary[];
   warnings: string[];
   dicom_files_found: Record<string, number>;
+  plan_ids?: number[];
+  plans?: any[];
+  latest_plan_label?: string;
+  is_record_only?: boolean;
+  updated_fractions?: [number, number][];
 }
 
 export interface PatientWithLatestPlan {
@@ -45,6 +51,8 @@ export interface PatientWithLatestPlan {
   qa_status: QAStatus;
   days_since_created: number;
   number_of_fields: number | null;
+  plan_count?: number;
+  plans?: PlanSummary[];
 }
 
 export interface PlanSummary {

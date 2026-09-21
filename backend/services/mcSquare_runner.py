@@ -148,40 +148,106 @@ def _should_mock() -> bool:
     return True
 
 
-def _mock_simulate(plan_id: int, output_dir: str, job_id: int, db: Session) -> str:
+def _mock_simulate(
+    plan_id: int, output_dir: str, job_id: int, db: Session, force: bool = False
+) -> str:
     """Build a mock MC dose by perturbing the TPS RTDose. Dev-only."""
-    from dicom.rtdose_parser import find_rtdose_file
+    import time
+    from dicom.rtdose_parser import find_rtdose_file, find_beam_rtdose_files
     from services.gamma_analysis import load_rtdose
 
     plan = db.query(Plan).filter_by(id=plan_id).first()
-    rtdose_path = find_rtdose_file(plan.dicom_store_path, plan_uid=plan.rtplan_uid) if plan else None
+    rtdose_path = (
+        find_rtdose_file(plan.dicom_store_path, plan_uid=plan.rtplan_uid)
+        if plan
+        else None
+    )
     if not rtdose_path:
         raise FileNotFoundError(
             f"No RTDose found for plan {plan_id} — cannot build mock MC dose."
         )
     tps = load_rtdose(rtdose_path)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    steps = 10
-    for i in range(steps):
-        if is_cancelled(job_id):
-            raise JobCancelled()
-        _update_progress(db, job_id, (i + 1) / steps * 0.9)
+    if force:
+        for f in out_dir.glob("mc_dose_beam*.npz"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        summed_file = out_dir / "mc_dose.npz"
+        if summed_file.exists():
+            try:
+                summed_file.unlink()
+            except Exception:
+                pass
+
+    beam_rtdoses = (
+        find_beam_rtdose_files(plan.dicom_store_path, plan_uid=plan.rtplan_uid)
+        if plan
+        else {}
+    )
+    beam_numbers = sorted(beam_rtdoses.keys()) if beam_rtdoses else [1]
+    n_beams = len(beam_numbers)
 
     rng = np.random.default_rng(plan_id)
-    noise = rng.normal(1.0, settings.MCSQUARE_MOCK_NOISE, size=tps.array.shape).astype(np.float32)
-    mc = DoseGrid(array=(tps.array * noise).astype(np.float32),
-                  spacing=tps.spacing, origin=tps.origin)
-    out_path = Path(output_dir) / "mc_dose.npz"
-    saved = mc.save(out_path)
+    summed_arr = None
+
+    for i, beam_no in enumerate(beam_numbers):
+        beam_path = out_dir / f"mc_dose_beam{beam_no}.npz"
+        if not force and beam_path.is_file():
+            try:
+                bg = DoseGrid.load(str(beam_path))
+                summed_arr = bg.array.copy() if summed_arr is None else summed_arr + bg.array
+                continue
+            except Exception:
+                pass
+
+        if is_cancelled(job_id):
+            raise JobCancelled()
+
+        # Step simulation progress
+        steps = 4
+        for s in range(steps):
+            if is_cancelled(job_id):
+                raise JobCancelled()
+            frac = (i + (s + 1) / steps) / n_beams * 0.95
+            _update_progress(db, job_id, frac)
+            time.sleep(0.05)
+
+        if beam_no in beam_rtdoses:
+            b_tps = load_rtdose(beam_rtdoses[beam_no])
+            b_noise = rng.normal(1.0, settings.MCSQUARE_MOCK_NOISE, size=b_tps.array.shape).astype(np.float32)
+            b_arr = (b_tps.array * b_noise).astype(np.float32)
+            mc_beam = DoseGrid(array=b_arr, spacing=b_tps.spacing, origin=b_tps.origin)
+        else:
+            noise = rng.normal(1.0, settings.MCSQUARE_MOCK_NOISE, size=tps.array.shape).astype(np.float32)
+            b_arr = (tps.array * noise / n_beams).astype(np.float32)
+            mc_beam = DoseGrid(array=b_arr, spacing=tps.spacing, origin=tps.origin)
+
+        mc_beam.save(beam_path)
+        summed_arr = b_arr.copy() if summed_arr is None else summed_arr + b_arr
+
+        # Update composite dose on disk
+        comp = DoseGrid(array=summed_arr, spacing=tps.spacing, origin=tps.origin)
+        comp.save(out_dir / "mc_dose.npz")
+
+    out_path = out_dir / "mc_dose.npz"
+    if summed_arr is not None:
+        comp = DoseGrid(array=summed_arr, spacing=tps.spacing, origin=tps.origin)
+        comp.save(out_path)
     _update_progress(db, job_id, 1.0)
-    return saved
+    return str(out_path)
 
 
 # ---------------------------------------------------------------------------
 # Real path — delegate to mcSquare_worker.py
 # ---------------------------------------------------------------------------
 
-def run_mcSquare(input_dir: str, output_dir: str, job_id: int, db: Session) -> str:
+def run_mcSquare(
+    input_dir: str, output_dir: str, job_id: int, db: Session, force: bool = False
+) -> str:
     """
     Run MCsquare (or the mock), updating QAJob.progress. Returns the path to the
     saved summed MC DoseGrid .npz.
@@ -195,9 +261,9 @@ def run_mcSquare(input_dir: str, output_dir: str, job_id: int, db: Session) -> s
         raise ValueError(f"Job {job_id} has no associated plan")
 
     if _should_mock():
-        return _mock_simulate(plan_id, output_dir, job_id, db)
+        return _mock_simulate(plan_id, output_dir, job_id, db, force=force)
 
-    return _run_worker(plan_id, output_dir, job_id, db)
+    return _run_worker(plan_id, output_dir, job_id, db, force=force)
 
 
 def _run_worker(
@@ -208,6 +274,7 @@ def _run_worker(
     ct_dir: Optional[str] = None,
     work_dir: Optional[Path] = None,
     dose_prefix: str = "mc_dose",
+    force: bool = False,
 ) -> str:
     plan = db.query(Plan).filter_by(id=plan_id).first()
     if plan is None or not plan.dicom_store_path:
@@ -270,6 +337,8 @@ def _run_worker(
         "--rbe", str(rbe),
         "--dose-prefix", str(dose_prefix),
     ]
+    if force:
+        cmd.append("--force")
     if plan.rtplan_uid:
         cmd.extend(["--plan-uid", str(plan.rtplan_uid)])
     if ct_dir:
@@ -279,8 +348,7 @@ def _run_worker(
         cmd.extend(["--ct-dir", str(ct_dir_abs)])
 
     logger.info(
-        f"Launching MCsquare worker for plan {plan_id} (prefix={dose_prefix}): store={store} "
-        f"{f'plan_uid={plan.rtplan_uid} ' if plan.rtplan_uid else ''}"
+        f"Launching MCsquare worker for plan {plan_id} (prefix={dose_prefix}, force={force}): store={store} "
         f"{f'ct_dir={ct_dir} ' if ct_dir else ''}bdl={bdl} exe={exe} unc={uncertainty}% rbe={rbe}"
     )
 

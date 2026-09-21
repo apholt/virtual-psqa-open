@@ -226,6 +226,33 @@ def _sop_uid(path: str) -> str:
         return ""
 
 
+def _pick_best_plan_file(candidates: list[tuple[str, str, str]], store: Path) -> str:
+    """Select the most canonical RTPLAN file when duplicate/anonymized copies exist.
+
+    Prefers:
+    1. Shallowest path relative to store (top-level directory).
+    2. Canonical RTPLAN filenames without numerical Orthanc prefixes (e.g. 'RP...' rather than '0_RP...').
+    3. Newest file modification time.
+    """
+    import re
+    def _rank(c: tuple[str, str, str]) -> tuple[int, int, int, float]:
+        p = Path(c[0])
+        try:
+            depth = len(p.relative_to(store).parts)
+        except Exception:
+            depth = 99
+        name = p.name
+        has_prefix = 1 if re.match(r"^\d+_", name) else 0
+        is_rp = 0 if (name.startswith("RP") or name.lower().startswith("rtplan")) else 1
+        try:
+            mtime = -p.stat().st_mtime
+        except Exception:
+            mtime = 0.0
+        return (depth, has_prefix, is_rp, mtime)
+
+    return sorted(candidates, key=_rank)[0][0]
+
+
 def _resolve_plan_file(plan: Plan) -> str:
     """Locate this plan's RTPLAN by SOPInstanceUID.
 
@@ -266,11 +293,26 @@ def _resolve_plan_file(plan: Plan) -> str:
                 )
             return exact[0][0]
         if len(exact) > 1:
-            raise FileNotFoundError(
-                f"Plan {plan.id}: {len(exact)} files share rtplan_uid {want}")
+            chosen = _pick_best_plan_file(exact, store)
+            logger.warning(
+                f"Plan {plan.id}: {len(exact)} files share rtplan_uid {want} "
+                f"({', '.join(Path(p).name for p, _, _ in exact)}); "
+                f"using {Path(chosen).name}."
+            )
+            return chosen
         raise FileNotFoundError(
             f"Plan {plan.id}: no RTPLAN in {store} matches rtplan_uid {want} "
             f"({len(candidates)} candidate(s) present) -- refusing to guess.")
+
+    # rtplan_uid not set: if all candidates share the same UID, pick best
+    uids = {c[1] for c in candidates if c[1]}
+    if len(uids) == 1:
+        chosen = _pick_best_plan_file(candidates, store)
+        logger.warning(
+            f"Plan {plan.id}: rtplan_uid not set; {len(candidates)} file(s) share sole "
+            f"UID {next(iter(uids))}; using {Path(chosen).name}."
+        )
+        return chosen
 
     if len(candidates) == 1:
         logger.warning(

@@ -35,16 +35,24 @@ def _normalize_beam_name(name: str) -> str:
 
 
 def _record_beam_names(record_dcm: pydicom.Dataset) -> set[str]:
-    seq = getattr(record_dcm, "TreatmentSessionIonBeamSequence", None) or []
+    seq = (
+        getattr(record_dcm, "TreatmentSessionIonBeamSequence", None)
+        or getattr(record_dcm, "TreatmentSessionBeamSequence", None)
+        or []
+    )
     return {_normalize_beam_name(b.BeamName) for b in seq if hasattr(b, "BeamName")}
 
 
 def _plan_beam_names(plan_dcm: pydicom.Dataset) -> set[str]:
-    seq = getattr(plan_dcm, "IonBeamSequence", None) or []
+    seq = (
+        getattr(plan_dcm, "IonBeamSequence", None)
+        or getattr(plan_dcm, "BeamSequence", None)
+        or []
+    )
     return {_normalize_beam_name(b.BeamName) for b in seq if hasattr(b, "BeamName")}
 
 
-def _find_plan_dicom(store_path: str) -> Optional[pydicom.Dataset]:
+def _find_plan_dicom(store_path: str, plan_uid: Optional[str] = None) -> Optional[pydicom.Dataset]:
     """Read the RTPLAN dataset (header only) from a plan's store dir."""
     from pathlib import Path
     for p in Path(store_path).glob("*.dcm"):
@@ -52,37 +60,67 @@ def _find_plan_dicom(store_path: str) -> Optional[pydicom.Dataset]:
             dcm = pydicom.dcmread(str(p), stop_before_pixels=True, force=True)
         except Exception:
             continue
-        if str(getattr(dcm, "Modality", "")).upper() == "RTPLAN":
-            return dcm
+        if str(getattr(dcm, "Modality", "")).upper() in ("RTPLAN", "RTIBTR"):
+            if plan_uid is None or str(getattr(dcm, "SOPInstanceUID", "")) == plan_uid:
+                return dcm
     return None
 
 
-def identify_plan_from_rtrecord(dcm: pydicom.Dataset, db: Session) -> int:
-    """Return the plan_id an RT Ion Record belongs to.
+def identify_plan_from_rtrecord(
+    dcm: pydicom.Dataset,
+    db: Session,
+    target_plan_id: Optional[int] = None,
+) -> int:
+    """Return the plan_id an RT Record belongs to.
 
-    Tries referenced-UID match first, then falls back to PatientID + beam-name
-    match (most recent plan). Raises ValueError if no plan can be matched.
+    Tries target_plan_id first, then referenced-UID match, then falls back to
+    PatientID + beam-name matching. If beam names cannot disambiguate among a
+    patient's multiple plans, gracefully defaults to the most recent plan.
     """
+    if target_plan_id is not None:
+        target = db.query(Plan).filter_by(id=target_plan_id).first()
+        if target:
+            logger.info(f"Record explicitly directed to target plan {target.id} ({target.plan_label}).")
+            return target.id
+
     # --- Strategy 1: referenced plan UID ---
-    ref_uid = None
+    ref_uids: list[str] = []
     ref_seq = getattr(dcm, "ReferencedRTPlanSequence", None)
     if ref_seq:
-        try:
-            ref_uid = str(ref_seq[0].ReferencedSOPInstanceUID)
-        except (IndexError, AttributeError):
-            ref_uid = None
-    if ref_uid:
+        for item in ref_seq:
+            try:
+                u = str(item.ReferencedSOPInstanceUID)
+                if u:
+                    ref_uids.append(u)
+            except (IndexError, AttributeError):
+                pass
+
+    for ref_uid in ref_uids:
         plan = db.query(Plan).filter_by(rtplan_uid=ref_uid).first()
         if plan:
-            logger.info(f"Record matched to plan {plan.id} via referenced UID.")
+            logger.info(f"Record matched to plan {plan.id} via referenced UID {ref_uid}.")
             return plan.id
-        logger.info(
-            f"Referenced plan UID {ref_uid} not found among stored plans; "
-            f"falling back to PatientID + beam match."
-        )
 
-    # --- Strategy 2: PatientID + beam-name match, most recent ---
+    # Check store directory DICOMs for matching SOPInstanceUID
     patient_id_str = str(getattr(dcm, "PatientID", "") or "")
+    if patient_id_str:
+        patient = db.query(Patient).filter_by(patient_id=patient_id_str).first()
+        if patient:
+            candidate_plans = (
+                db.query(Plan)
+                .filter_by(patient_id=patient.id)
+                .order_by(Plan.created_at.desc())
+                .all()
+            )
+            for cand in candidate_plans:
+                cand_dcm = _find_plan_dicom(cand.dicom_store_path, plan_uid=cand.rtplan_uid)
+                if cand_dcm:
+                    cand_sop = str(getattr(cand_dcm, "SOPInstanceUID", ""))
+                    if cand_sop in ref_uids:
+                        logger.info(f"Record matched to plan {cand.id} via store SOPInstanceUID.")
+                        return cand.id
+
+    # --- Strategy 2: PatientID + beam-name match ---
     if not patient_id_str:
         raise ValueError("RT Record has no PatientID; cannot match to a plan.")
 
@@ -105,10 +143,12 @@ def identify_plan_from_rtrecord(dcm: pydicom.Dataset, db: Session) -> int:
 
     record_beams = _record_beam_names(dcm)
 
-    # Prefer the most recent plan whose beam names match the record's.
+    # Prefer plan whose beam names match the record's (exact or subset)
+    scored_plans: list[tuple[float, Plan]] = []
     best_no_beam_info = None
-    for plan in plans:  # already newest-first
-        plan_dcm = _find_plan_dicom(plan.dicom_store_path)
+
+    for plan in plans:
+        plan_dcm = _find_plan_dicom(plan.dicom_store_path, plan_uid=plan.rtplan_uid)
         if plan_dcm is None:
             continue
         plan_beams = _plan_beam_names(plan_dcm)
@@ -122,12 +162,24 @@ def identify_plan_from_rtrecord(dcm: pydicom.Dataset, db: Session) -> int:
                 f"(patient {patient_id_str}, beams {sorted(record_beams)})."
             )
             return plan.id
+        if record_beams and plan_beams:
+            overlap = len(record_beams & plan_beams)
+            if overlap > 0:
+                scored_plans.append((overlap / len(record_beams), plan))
 
-    # If no beam-name match but the patient has exactly one plan, use it.
+    # Highest beam overlap
+    if scored_plans:
+        scored_plans.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_plan = scored_plans[0]
+        logger.info(
+            f"Record matched to plan {best_plan.id} via beam overlap score {best_score:.2f}."
+        )
+        return best_plan.id
+
+    # If only 1 plan exists for this patient, use it
     if len(plans) == 1:
         logger.info(
-            f"Record matched to plan {plans[0].id} via PatientID (single plan; "
-            f"beam names did not overlap — verify beam naming)."
+            f"Record matched to single plan {plans[0].id} for patient {patient_id_str}."
         )
         return plans[0].id
 
@@ -138,10 +190,12 @@ def identify_plan_from_rtrecord(dcm: pydicom.Dataset, db: Session) -> int:
         )
         return best_no_beam_info
 
-    raise ValueError(
-        f"Patient {patient_id_str} has {len(plans)} plans but none match the "
-        f"record's beams {sorted(record_beams)}. Cannot disambiguate."
+    # Graceful fallback: default to the most recent plan for the patient
+    logger.warning(
+        f"Record for patient {patient_id_str} has {len(plans)} plans but none strictly match "
+        f"record beams {sorted(record_beams)}; defaulting to most recent plan {plans[0].id} ({plans[0].plan_label})."
     )
+    return plans[0].id
 
 
 def record_delivery_type(dcm: pydicom.Dataset) -> str:

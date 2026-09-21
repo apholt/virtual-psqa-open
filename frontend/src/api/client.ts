@@ -74,6 +74,16 @@ export const uploadDicom = (files: File[]) => {
     .then((r) => r.data);
 };
 
+export const uploadPlanRecords = (planId: number, files: File[]) => {
+  const form = new FormData();
+  files.forEach((f) => form.append("files", f));
+  return api
+    .post<PlanIngestionResponse>(`/plans/${planId}/upload-records`, form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    })
+    .then((r) => r.data);
+};
+
 export const getPlanFields = (planId: number) =>
   api.get<FieldSummary[]>(`/plans/${planId}/fields`).then((r) => r.data);
 
@@ -84,9 +94,19 @@ export const getPlan = (planId: number) =>
 export const createJob = (planId: number, jobType: string, fractionNumber?: number) =>
   api.post<QAJobResponse>("/jobs", { plan_id: planId, job_type: jobType, fraction_number: fractionNumber ?? null }).then((r) => r.data);
 
-export const runJob = (planId: number, jobType: string, fractionNumber?: number) =>
+export const runJob = (
+  planId: number,
+  jobType: string,
+  fractionNumber?: number,
+  force: boolean = false
+) =>
   api
-    .post<QAJobResponse>("/jobs/run", { plan_id: planId, job_type: jobType, fraction_number: fractionNumber ?? null })
+    .post<QAJobResponse>("/jobs/run", {
+      plan_id: planId,
+      job_type: jobType,
+      fraction_number: fractionNumber ?? null,
+      force,
+    })
     .then((r) => r.data);
 
 export const getJob = (jobId: number) =>
@@ -94,6 +114,9 @@ export const getJob = (jobId: number) =>
 
 export const cancelJob = (jobId: number) =>
   api.post<QAJobResponse>(`/jobs/${jobId}/cancel`).then((r) => r.data);
+
+export const stopJob = (jobId: number) =>
+  api.post<QAJobResponse>(`/jobs/${jobId}/stop`).then((r) => r.data);
 
 export const getPlanJobs = (planId: number) =>
   api.get<QAJobResponse[]>(`/jobs/plan/${planId}`).then((r) => r.data);

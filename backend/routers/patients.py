@@ -26,7 +26,7 @@ async def list_patients(
     """Returns patient list with their most recent plan's QA status."""
     query = db.query(Patient).order_by(desc(Patient.created_at))
 
-    if search:
+    if search and isinstance(search, str):
         like = f"%{search}%"
         query = query.filter(
             Patient.patient_id.ilike(like) | Patient.patient_name.ilike(like)
@@ -37,18 +37,19 @@ async def list_patients(
     now = datetime.now(timezone.utc)
 
     for patient in patients:
-        # Get most recent plan
-        latest_plan = (
+        # Get all plans for patient, newest first
+        patient_plans = (
             db.query(Plan)
             .filter_by(patient_id=patient.id)
             .order_by(desc(Plan.created_at))
-            .first()
+            .all()
         )
+        latest_plan = patient_plans[0] if patient_plans else None
 
         if latest_plan:
-            if status and latest_plan.qa_status != status:
+            if status and isinstance(status, str) and latest_plan.qa_status != status:
                 continue
-            if site and (not latest_plan.treatment_site or site.lower() not in latest_plan.treatment_site.lower()):
+            if site and isinstance(site, str) and (not latest_plan.treatment_site or site.lower() not in latest_plan.treatment_site.lower()):
                 continue
 
         qa_status = latest_plan.qa_status if latest_plan else "pending"
@@ -67,6 +68,8 @@ async def list_patients(
                 qa_status=qa_status,
                 days_since_created=days_since,
                 number_of_fields=latest_plan.number_of_fields if latest_plan else None,
+                plan_count=len(patient_plans),
+                plans=[PlanSummary.model_validate(p) for p in patient_plans],
             )
         )
 

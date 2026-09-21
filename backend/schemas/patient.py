@@ -3,6 +3,9 @@ from typing import Optional
 from pydantic import BaseModel
 
 
+from schemas.plan import PlanSummary
+
+
 class PatientBase(BaseModel):
     patient_id: str
     patient_name: str
@@ -30,5 +33,7 @@ class PatientWithLatestPlan(BaseModel):
     qa_status: str
     days_since_created: int
     number_of_fields: Optional[int] = None
+    plan_count: int = 1
+    plans: Optional[list[PlanSummary]] = None
 
     model_config = {"from_attributes": True}

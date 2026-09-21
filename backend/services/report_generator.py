@@ -27,7 +27,7 @@ import logging
 from datetime import datetime
 from html import escape
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 from sqlalchemy.orm import Session
@@ -600,6 +600,14 @@ def build_report_html(plan_id: int, db: Session) -> str:
     if not field_rows and target_rows:
         field_rows = target_rows
 
+    # Deduplicate field rows so each beam is listed exactly once (latest entry kept)
+    dedup_fields: dict[Any, GammaResult] = {}
+    for r in field_rows:
+        key = r.beam_number if r.beam_number is not None else r.field_name
+        dedup_fields[key] = r
+    field_rows = list(dedup_fields.values())
+    field_rows.sort(key=lambda r: (r.beam_number if r.beam_number is not None else 0, r.field_name or ""))
+
     # Parse RTPLAN field details for gantry angles / MU
     field_details = []
     if plan.dicom_store_path:
@@ -863,12 +871,26 @@ def build_secondary_dose_report_html(plan_id: int, db: Session) -> str:
         raise ValueError(f"Plan {plan_id} not found")
 
     patient = plan.patient
+    # Filter for pre-treatment secondary dose evaluation (fraction_number is None)
+    # and order by id descending to pick the latest calculation per beam
     gamma_rows = (
         db.query(GammaResult)
-        .filter_by(plan_id=plan_id, comparison_type="mcSquare_vs_TPS")
-        .order_by(GammaResult.id.asc())
+        .filter(
+            GammaResult.plan_id == plan_id,
+            GammaResult.comparison_type == "mcSquare_vs_TPS",
+            GammaResult.fraction_number.is_(None),
+        )
+        .order_by(GammaResult.id.desc())
         .all()
     )
+    if not gamma_rows:
+        # Fallback to any mcSquare_vs_TPS rows if fraction_number was set
+        gamma_rows = (
+            db.query(GammaResult)
+            .filter_by(plan_id=plan_id, comparison_type="mcSquare_vs_TPS")
+            .order_by(GammaResult.id.desc())
+            .all()
+        )
 
     # If gamma analysis has not been run yet, run on the fly so report is populated
     if not gamma_rows:
@@ -877,16 +899,57 @@ def build_secondary_dose_report_html(plan_id: int, db: Session) -> str:
             run_gamma_analysis(plan_id, db)
             gamma_rows = (
                 db.query(GammaResult)
-                .filter_by(plan_id=plan_id, comparison_type="mcSquare_vs_TPS")
-                .order_by(GammaResult.id.asc())
+                .filter(
+                    GammaResult.plan_id == plan_id,
+                    GammaResult.comparison_type == "mcSquare_vs_TPS",
+                    GammaResult.fraction_number.is_(None),
+                )
+                .order_by(GammaResult.id.desc())
                 .all()
             )
+            if not gamma_rows:
+                gamma_rows = (
+                    db.query(GammaResult)
+                    .filter_by(plan_id=plan_id, comparison_type="mcSquare_vs_TPS")
+                    .order_by(GammaResult.id.desc())
+                    .all()
+                )
         except Exception as _g_err:
             logger.warning(f"On-demand gamma analysis for report {plan_id} failed: {_g_err}")
 
-    # Composite vs per-beam rows
-    composite_row = next((r for r in gamma_rows if r.field_name == "Composite" or r.beam_number is None), None)
-    beam_rows = [r for r in gamma_rows if r.beam_number is not None]
+    # Composite vs per-beam rows: deduplicate by beam_number/field_name, preferring active settings criteria
+    composite_row = next(
+        (
+            r for r in gamma_rows
+            if (r.field_name == "Composite" or r.beam_number is None)
+            and abs(r.dd_percent - settings.GAMMA_MCSQUARE_VS_TPS_DD) < 0.01
+            and abs(r.dta_mm - settings.GAMMA_MCSQUARE_VS_TPS_DTA) < 0.01
+        ),
+        next((r for r in gamma_rows if r.field_name == "Composite" or r.beam_number is None), None),
+    )
+
+    # Deduplicate beam rows so each beam is listed exactly once (latest calculation)
+    beam_dict: dict[Any, GammaResult] = {}
+    for r in gamma_rows:
+        if r.beam_number is None and r.field_name == "Composite":
+            continue
+        key = r.beam_number if r.beam_number is not None else r.field_name
+        if key not in beam_dict:
+            beam_dict[key] = r
+        else:
+            prev = beam_dict[key]
+            curr_matches = (
+                abs(r.dd_percent - settings.GAMMA_MCSQUARE_VS_TPS_DD) < 0.01
+                and abs(r.dta_mm - settings.GAMMA_MCSQUARE_VS_TPS_DTA) < 0.01
+            )
+            prev_matches = (
+                abs(prev.dd_percent - settings.GAMMA_MCSQUARE_VS_TPS_DD) < 0.01
+                and abs(prev.dta_mm - settings.GAMMA_MCSQUARE_VS_TPS_DTA) < 0.01
+            )
+            if curr_matches and not prev_matches:
+                beam_dict[key] = r
+
+    beam_rows = list(beam_dict.values())
     if not beam_rows:
         beam_rows = [r for r in gamma_rows if r != composite_row] if composite_row else list(gamma_rows)
     beam_rows.sort(key=lambda r: (r.beam_number if r.beam_number is not None else 0, r.field_name or ""))

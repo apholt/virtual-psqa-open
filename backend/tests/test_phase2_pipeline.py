@@ -60,5 +60,40 @@ def main() -> None:
     db.close()
 
 
+def test_resolve_plan_file_with_duplicate_uids():
+    """Verify _resolve_plan_file handles multiple duplicate/anonymized files sharing rtplan_uid."""
+    import shutil
+    from models.plan import Plan
+    from services.log_reconstructor import _resolve_plan_file
+
+    db = SessionLocal()
+    tmp = tempfile.mkdtemp(prefix="test_dup_plan_")
+    write_synthetic_dicom_set(tmp, n_fields=2)
+    result = ingest_dicom_directory(tmp, db)
+    plan_id = result["plan_id"]
+    plan = db.query(Plan).filter_by(id=plan_id).first()
+
+    # Find the RTPLAN file in plan.dicom_store_path
+    store = Path(plan.dicom_store_path)
+    rp_file = next(store.glob("RP*.dcm"))
+
+    # Create 3 copies with Orthanc-like prefixes
+    copy1 = store / f"0_{rp_file.name}"
+    copy2 = store / f"1_{rp_file.name}"
+    copy3 = store / f"218_{rp_file.name}"
+    shutil.copy2(rp_file, copy1)
+    shutil.copy2(rp_file, copy2)
+    shutil.copy2(rp_file, copy3)
+    # Remove original to ensure it handles prefixed copies
+    rp_file.unlink()
+
+    # Should resolve without raising FileNotFoundError
+    resolved = _resolve_plan_file(plan)
+    assert Path(resolved).exists()
+    assert Path(resolved).name in (copy1.name, copy2.name, copy3.name)
+
+    db.close()
+
+
 if __name__ == "__main__":
     main()

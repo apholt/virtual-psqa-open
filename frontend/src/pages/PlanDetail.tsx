@@ -23,6 +23,9 @@ import {
   Server,
   Radio,
   ClipboardCheck,
+  Square,
+  RotateCcw,
+  UploadCloud,
 } from "lucide-react";
 import {
   getPlan,
@@ -65,6 +68,7 @@ import { FractionLogViewer } from "../components/FractionLogViewer";
 import { SyntheticCTViewer } from "../components/SyntheticCTViewer";
 import { OIRViewer } from "../components/OIRViewer";
 import { OrthancImportModal } from "../components/OrthancImportModal";
+import { UploadRecordModal } from "../components/UploadRecordModal";
 import { CouchTrackingTrend } from "../components/CouchTrackingTrend";
 import { ChartCheckModal } from "../components/ChartCheckModal";
 import { RobustnessDVHCard } from "../components/RobustnessDVHCard";
@@ -300,6 +304,7 @@ export function PlanDetail() {
   const [fractionSummaries, setFractionSummaries] = useState<FractionLogSummary[]>([]);
   const [showSpotMap, setShowSpotMap] = useState(false);
   const [showOrthancModal, setShowOrthancModal] = useState(false);
+  const [showUploadRecordModal, setShowUploadRecordModal] = useState(false);
   const [orthancTab, setOrthancTab] = useState<"plans" | "rt_records" | "offline_images">("plans");
   const [showChartCheckModal, setShowChartCheckModal] = useState(false);
   const [chartCheckCount, setChartCheckCount] = useState<number | null>(null);
@@ -376,6 +381,16 @@ export function PlanDetail() {
     const nums = new Set<number>();
     for (const s of doseInfo.sources) {
       const m = /_beam(\d+)$/.exec(s.source);
+      if (m) nums.add(parseInt(m[1], 10));
+    }
+    return Array.from(nums).sort((a, b) => a - b);
+  }, [doseInfo]);
+
+  const mcCompletedBeams = useMemo(() => {
+    if (!doseInfo) return [];
+    const nums = new Set<number>();
+    for (const s of doseInfo.sources) {
+      const m = /^mcSquare_beam(\d+)$/.exec(s.source);
       if (m) nums.add(parseInt(m[1], 10));
     }
     return Array.from(nums).sort((a, b) => a - b);
@@ -464,6 +479,9 @@ export function PlanDetail() {
             if (j.status === "complete") {
               toast.success("QA Calculation completed successfully!");
               loadPlanData();
+            } else if (j.status === "cancelled") {
+              toast("Calculation stopped — completed beam doses preserved.", { icon: "🛑" });
+              loadPlanData();
             } else if (j.status === "error") {
               toast.error(`Job failed: ${j.error_message || "Unknown error"}`);
             }
@@ -477,13 +495,17 @@ export function PlanDetail() {
     [loadPlanData]
   );
 
-  const handleLaunchJob = async (type: "mcSquare" | "log_reconstruction") => {
+  const handleLaunchJob = async (type: "mcSquare" | "log_reconstruction", force: boolean = false) => {
     if (Number.isNaN(id)) return;
     try {
       setJobPolling(true);
-      const job = await runJob(id, type);
+      const job = await runJob(id, type, undefined, force);
       setActiveJob(job);
-      toast.success(`${type === "mcSquare" ? "MCsquare simulation" : "Log reconstruction"} launched!`);
+      toast.success(
+        force
+          ? "Starting full MC calculation (clearing cache)..."
+          : `${type === "mcSquare" ? "MCsquare simulation" : "Log reconstruction"} launched!`
+      );
       pollJob(job.id);
     } catch {
       toast.error(`Failed to launch ${type} job.`);
@@ -491,13 +513,13 @@ export function PlanDetail() {
     }
   };
 
-  const handleCancelJob = async () => {
+  const handleStopJob = async () => {
     if (!activeJob) return;
     try {
       await cancelJob(activeJob.id);
-      toast.success("Job cancellation requested.");
+      toast("Stop requested — completed beam doses will be preserved.", { icon: "🛑" });
     } catch {
-      toast.error("Failed to cancel job.");
+      toast.error("Failed to stop job.");
     }
   };
 
@@ -565,21 +587,43 @@ export function PlanDetail() {
                   MCsquare {Math.round((activeJob.progress || 0) * 100)}%
                 </span>
                 <button
-                  onClick={handleCancelJob}
-                  className="ml-1 px-1.5 py-0.5 bg-red-600/20 hover:bg-red-600/30 text-red-400 text-[11px] font-semibold rounded border border-red-500/30 transition-colors"
-                  title="Cancel MCsquare Simulation"
+                  onClick={handleStopJob}
+                  className="flex items-center gap-1 ml-1 px-2 py-0.5 bg-red-600/20 hover:bg-red-600/30 text-red-400 text-[11px] font-semibold rounded border border-red-500/30 transition-colors"
+                  title="Stop MCsquare simulation (completed beam doses are preserved)"
                 >
-                  Cancel
+                  <Square size={10} fill="currentColor" />
+                  Stop
+                </button>
+              </div>
+            ) : mcCompletedBeams.length > 0 && mcCompletedBeams.length < (plan.number_of_fields || 0) ? (
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => handleLaunchJob("mcSquare", false)}
+                  disabled={jobPolling}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-amber-600 hover:bg-amber-500 text-white font-medium rounded transition-colors shadow-sm disabled:opacity-50"
+                  title={`Resume calculation for remaining ${plan.number_of_fields - mcCompletedBeams.length} beam(s)`}
+                >
+                  <Play size={12} fill="currentColor" />
+                  Resume MC ({mcCompletedBeams.length}/{plan.number_of_fields})
+                </button>
+                <button
+                  onClick={() => handleLaunchJob("mcSquare", true)}
+                  disabled={jobPolling}
+                  className="flex items-center gap-1 px-2 py-1.5 text-xs bg-clinical-surface hover:bg-clinical-border/30 border border-clinical-border text-clinical-muted hover:text-clinical-text rounded transition-colors disabled:opacity-50"
+                  title="Discard cached beam doses and re-run all beams from scratch"
+                >
+                  <RotateCcw size={12} />
+                  Restart All
                 </button>
               </div>
             ) : (
               <button
-                onClick={() => handleLaunchJob("mcSquare")}
+                onClick={() => handleLaunchJob("mcSquare", false)}
                 disabled={jobPolling}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-clinical-accent text-white font-medium rounded hover:bg-clinical-accent/90 transition-colors shadow-sm disabled:opacity-50"
               >
                 <Play size={13} fill="currentColor" />
-                Run MC Simulation
+                {mcCompletedBeams.length > 0 ? "Re-run MC" : "Run MC Simulation"}
               </button>
             )}
 
@@ -673,6 +717,16 @@ export function PlanDetail() {
               Orthanc PACS
             </button>
 
+            {/* Direct RT Record Upload Action */}
+            <button
+              onClick={() => setShowUploadRecordModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded font-medium transition-colors"
+              title="Upload RT Record (.dcm or .zip) directly for this plan"
+            >
+              <UploadCloud size={13} />
+              Upload RT Record
+            </button>
+
             {/* Gate Mute / Active Toggle Button */}
             <button
               onClick={toggleMuteGate}
@@ -716,11 +770,44 @@ export function PlanDetail() {
               </div>
             </div>
             <button
-              onClick={handleCancelJob}
-              className="ml-4 text-xs font-semibold text-red-600 dark:text-red-400 hover:underline"
+              onClick={handleStopJob}
+              className="ml-4 flex items-center gap-1 text-xs font-semibold text-red-600 dark:text-red-400 hover:underline"
+              title="Stop simulation (completed beam doses will be preserved)"
             >
-              Cancel
+              <Square size={11} fill="currentColor" />
+              Stop Calculation
             </button>
+          </div>
+        )}
+
+        {/* Partial Calculation Banner */}
+        {!jobPolling && mcCompletedBeams.length > 0 && mcCompletedBeams.length < (plan.number_of_fields || 0) && (
+          <div className="bg-amber-500/10 border-t border-amber-500/30 px-4 py-2 flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2 text-amber-300">
+              <span className="font-semibold">Partial Calculation Saved:</span>
+              <span>
+                {mcCompletedBeams.length} of {plan.number_of_fields} beam doses completed and preserved.
+                Gamma analysis and dose displays reflect completed beams.
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleLaunchJob("mcSquare", false)}
+                className="flex items-center gap-1 px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-black font-semibold rounded text-xs transition-colors shadow-sm"
+                title={`Continue simulation for remaining ${plan.number_of_fields - mcCompletedBeams.length} beam(s)`}
+              >
+                <Play size={11} fill="currentColor" />
+                Resume ({mcCompletedBeams.length}/{plan.number_of_fields})
+              </button>
+              <button
+                onClick={() => handleLaunchJob("mcSquare", true)}
+                className="flex items-center gap-1 px-2 py-1 bg-clinical-surface text-clinical-muted hover:text-clinical-text border border-clinical-border rounded text-xs transition-colors"
+                title="Discard cached beam doses and recalculate all beams from scratch"
+              >
+                <RotateCcw size={11} />
+                Restart All
+              </button>
+            </div>
           </div>
         )}
 
@@ -1084,15 +1171,42 @@ export function PlanDetail() {
                       />
                     </div>
                     <button
-                      onClick={handleCancelJob}
-                      className="px-4 py-1.5 bg-red-600/10 hover:bg-red-600/20 text-red-400 border border-red-500/30 text-xs font-semibold rounded transition-colors"
+                      onClick={handleStopJob}
+                      className="flex items-center justify-center gap-1.5 px-4 py-1.5 mx-auto bg-red-600/10 hover:bg-red-600/20 text-red-400 border border-red-500/30 text-xs font-semibold rounded transition-colors"
+                      title="Stop simulation (completed beam doses will be preserved)"
                     >
-                      Cancel Simulation
+                      <Square size={12} fill="currentColor" />
+                      Stop Simulation
                     </button>
+                  </div>
+                ) : mcCompletedBeams.length > 0 && mcCompletedBeams.length < (plan.number_of_fields || 0) ? (
+                  <div className="flex flex-col items-center gap-2">
+                    <p className="text-xs text-amber-300 font-medium">
+                      {mcCompletedBeams.length} of {plan.number_of_fields} beam doses completed and preserved.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleLaunchJob("mcSquare", false)}
+                        disabled={jobPolling}
+                        className="flex items-center gap-1.5 px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black text-xs font-semibold rounded transition-colors shadow-sm"
+                      >
+                        <Play size={13} fill="currentColor" />
+                        Resume Simulation ({mcCompletedBeams.length}/{plan.number_of_fields})
+                      </button>
+                      <button
+                        onClick={() => handleLaunchJob("mcSquare", true)}
+                        disabled={jobPolling}
+                        className="flex items-center gap-1.5 px-3 py-2 bg-clinical-surface hover:bg-clinical-border/30 border border-clinical-border text-clinical-muted hover:text-clinical-text text-xs rounded transition-colors"
+                        title="Discard cached beam doses and recalculate all beams"
+                      >
+                        <RotateCcw size={12} />
+                        Restart All
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <button
-                    onClick={() => handleLaunchJob("mcSquare")}
+                    onClick={() => handleLaunchJob("mcSquare", false)}
                     disabled={jobPolling}
                     className="px-4 py-2 bg-clinical-accent text-white text-xs font-medium rounded hover:bg-clinical-accent/90 transition-colors shadow-sm"
                   >
@@ -1177,26 +1291,35 @@ export function PlanDetail() {
         {/* TAB 2: FRACTIONAL TRACKING & DELIVERY LOGS */}
         {activeTab === "fractions" && (
           <div className="space-y-5">
-            {/* Orthanc Delivery Records Import Banner */}
+            {/* Delivery Records Import & Upload Banner */}
             <div className="flex items-center justify-between p-3.5 rounded-lg bg-clinical-surface border border-clinical-border shadow-xs">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
                   <Layers size={16} />
                 </div>
                 <div>
-                  <span className="text-xs font-semibold text-clinical-text">Orthanc PACS Delivery Records</span>
-                  <p className="text-[11px] text-clinical-muted">Import delivered machine logs and treatment records from Orthanc for this plan.</p>
+                  <span className="text-xs font-semibold text-clinical-text">Delivery Logs & Treatment Records</span>
+                  <p className="text-[11px] text-clinical-muted">Import delivered machine logs from Orthanc or upload RT Record files directly for this plan.</p>
                 </div>
               </div>
-              <button
-                onClick={() => {
-                  setOrthancTab("rt_records");
-                  setShowOrthancModal(true);
-                }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600/20 border border-indigo-500/30 transition-colors"
-              >
-                <Server size={13} /> Import RT Records from Orthanc
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowUploadRecordModal(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600/10 text-emerald-400 hover:bg-emerald-600/20 border border-emerald-500/30 transition-colors"
+                  title="Upload RT Record DICOM file or zip directly for this plan"
+                >
+                  <UploadCloud size={13} /> Upload RT Record
+                </button>
+                <button
+                  onClick={() => {
+                    setOrthancTab("rt_records");
+                    setShowOrthancModal(true);
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600/20 border border-indigo-500/30 transition-colors"
+                >
+                  <Server size={13} /> Import from Orthanc
+                </button>
+              </div>
             </div>
 
             {interruptedFractions.length > 0 && (
@@ -1445,6 +1568,22 @@ export function PlanDetail() {
           initialPlanId={id}
           initialTab={orthancTab}
           onPlanImported={() => {
+            loadPlanData();
+          }}
+        />
+      )}
+
+      {/* Upload RT Record Modal */}
+      {showUploadRecordModal && (
+        <UploadRecordModal
+          planId={plan.id}
+          planLabel={plan.plan_label}
+          onClose={() => setShowUploadRecordModal(false)}
+          onSuccess={(result) => {
+            setShowUploadRecordModal(false);
+            toast.success(
+              result.warnings?.[0] || `RT Record uploaded for ${plan.plan_label}`
+            );
             loadPlanData();
           }}
         />

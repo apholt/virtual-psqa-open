@@ -55,7 +55,7 @@ async def run_job(
     db.commit()
     db.refresh(job)
 
-    background_tasks.add_task(run_qa_job, job.id)
+    background_tasks.add_task(run_qa_job, job.id, force=bool(payload.force))
     return job
 
 
@@ -71,6 +71,12 @@ async def cancel_job(job_id: int, db: Session = Depends(get_db)):
         )
     request_cancel(job_id)
     return job
+
+
+@router.post("/{job_id}/stop", response_model=QAJobResponse)
+async def stop_job(job_id: int, db: Session = Depends(get_db)):
+    """Stops/cancels a running QA job cooperatively while preserving partial cached results."""
+    return await cancel_job(job_id=job_id, db=db)
 
 
 @router.get("/{job_id}", response_model=QAJobResponse)

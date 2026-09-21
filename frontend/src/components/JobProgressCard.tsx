@@ -1,4 +1,4 @@
-import { CheckCircle, XCircle, Loader2, Clock, Ban } from "lucide-react";
+import { CheckCircle, XCircle, Loader2, Clock, Ban, Square } from "lucide-react";
 import type { QAJobResponse } from "../types";
 
 interface Props {
@@ -18,7 +18,7 @@ const STATUS_META: Record<
   running: { label: "Running", color: "text-blue-400", icon: Loader2 },
   complete: { label: "Complete", color: "text-green-400", icon: CheckCircle },
   error: { label: "Error", color: "text-red-400", icon: XCircle },
-  cancelled: { label: "Cancelled", color: "text-clinical-muted", icon: Ban },
+  cancelled: { label: "Stopped", color: "text-clinical-muted", icon: Ban },
 };
 
 export function JobProgressCard({
@@ -77,9 +77,11 @@ export function JobProgressCard({
         {isActive ? (
           <button
             onClick={onCancel}
-            className="px-3 py-1.5 text-xs font-medium text-red-400 border border-red-500/30 rounded-md hover:bg-red-500/10 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-red-400 border border-red-500/30 rounded-md hover:bg-red-500/10 transition-colors"
+            title="Stop calculation and preserve completed beam doses"
           >
-            Cancel
+            <Square size={11} fill="currentColor" />
+            Stop
           </button>
         ) : (
           <button

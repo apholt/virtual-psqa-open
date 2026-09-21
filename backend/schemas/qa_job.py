@@ -22,3 +22,4 @@ class QAJobCreate(BaseModel):
     plan_id: int
     job_type: str
     fraction_number: Optional[int] = None
+    force: Optional[bool] = False

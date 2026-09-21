@@ -21,6 +21,8 @@ def find_rtdose_file(dicom_store_path: str, plan_uid: Optional[str] = None) -> O
     If `plan_uid` is provided, filters for RTDose files whose
     ReferencedRTPlanSequence matches `plan_uid`, preventing cross-contamination
     when multiple plans or adaptive versions share a patient store.
+    Skips multi-plan doses (DoseSummationType=MULTI_PLAN or referencing multiple plans)
+    when matching an individual plan/beamset.
     Falls back to unreferenced RTDose only if no matching plan-referenced dose exists.
     """
     matching_candidates: list[str] = []
@@ -35,31 +37,39 @@ def find_rtdose_file(dicom_store_path: str, plan_uid: Optional[str] = None) -> O
                 continue
 
             summary_type = str(dcm.get("DoseSummationType", "")).upper()
-            ref_plan_uid = None
-            try:
-                ref_seq = getattr(dcm, "ReferencedRTPlanSequence", None)
-                if ref_seq and len(ref_seq) > 0:
-                    ref_plan_uid = str(ref_seq[0].ReferencedSOPInstanceUID)
-            except Exception:
-                pass
+            ref_seq = getattr(dcm, "ReferencedRTPlanSequence", None)
+            ref_uids = []
+            if ref_seq:
+                for item in ref_seq:
+                    uid = getattr(item, "ReferencedSOPInstanceUID", None)
+                    if uid:
+                        ref_uids.append(str(uid))
 
             if plan_uid is not None:
-                if ref_plan_uid is not None:
-                    if ref_plan_uid == plan_uid:
+                if ref_uids:
+                    if plan_uid in ref_uids:
+                        # Multi-plan sum across beamsets should not be treated as a single beamset's dose
+                        if summary_type == "MULTI_PLAN" or len(ref_uids) > 1:
+                            logger.debug(f"Skipping MULTI_PLAN dose {path.name} for individual plan {plan_uid}")
+                            continue
                         matching_candidates.append(str(path))
                         if summary_type == "PLAN":
                             matching_plan_dose = str(path)
                     else:
                         # Explicitly references a DIFFERENT plan — skip!
                         logger.debug(
-                            f"Skipping RTDose {path.name}: references plan {ref_plan_uid} != target {plan_uid}"
+                            f"Skipping RTDose {path.name}: references plan {ref_uids} != target {plan_uid}"
                         )
                         continue
                 else:
+                    if summary_type == "MULTI_PLAN":
+                        continue
                     fallback_candidates.append(str(path))
                     if summary_type == "PLAN":
                         fallback_plan_dose = str(path)
             else:
+                if summary_type == "MULTI_PLAN":
+                    continue
                 fallback_candidates.append(str(path))
                 if summary_type == "PLAN":
                     fallback_plan_dose = str(path)
@@ -95,6 +105,7 @@ def find_beam_rtdose_files(
 
     If `plan_uid` is provided, skips any RTDOSE referencing a different RTPlan.
     If `valid_beam_numbers` is provided, skips beam numbers not belonging to the plan.
+    Deduplicates identical/duplicate beam dose files.
     """
     valid_set = set(valid_beam_numbers) if valid_beam_numbers is not None else None
     beam_doses: dict[int, str] = {}
@@ -138,8 +149,10 @@ def find_beam_rtdose_files(
                         f"Skipping beam RTDose {path.name}: beam {beam_num} not in valid plan beams {valid_set}"
                     )
                     continue
-                beam_doses[beam_num] = str(path)
-                logger.info(f"Found BEAM-level RTDose for beam {beam_num}: {path.name}")
+                # If already present, don't overwrite unless current one is more canonical
+                if beam_num not in beam_doses:
+                    beam_doses[beam_num] = str(path)
+                    logger.info(f"Found BEAM-level RTDose for beam {beam_num}: {path.name}")
         except Exception:
             continue
     return beam_doses
@@ -197,5 +210,49 @@ def load_plan_rtdose(dicom_store_path: str, plan_uid: Optional[str] = None) -> D
     """Convenience: finds and loads the RTDose for a plan's dicom_store folder."""
     path = find_rtdose_file(dicom_store_path, plan_uid=plan_uid)
     if path is None:
-        raise FileNotFoundError(f"No RTDOSE file found in {dicom_store_path}")
+        raise FileNotFoundError(f"No RTDOSE file found in {dicom_store_path} (plan_uid={plan_uid})")
     return load_rtdose(path)
+
+
+def clean_store_duplicates(dicom_store_path: str) -> list[str]:
+    """
+    Scans a directory for duplicate DICOM files (matching SHA256 or matching SOPInstanceUID).
+    Preserves the first/canonical file and unlinks any subsequent identical copies.
+    Returns list of removed filenames.
+    """
+    import hashlib
+
+    removed: list[str] = []
+    seen_hashes: dict[str, str] = {}
+    seen_sops: dict[str, str] = {}
+    p = Path(dicom_store_path)
+    if not p.is_dir():
+        return removed
+
+    for f in sorted(p.glob("*.dcm")):
+        if not f.is_file():
+            continue
+        try:
+            content = f.read_bytes()
+            h = hashlib.sha256(content).hexdigest()
+            if h in seen_hashes:
+                logger.info(f"Removing duplicate DICOM file {f.name} (identical hash to {seen_hashes[h]})")
+                f.unlink()
+                removed.append(f.name)
+                continue
+            seen_hashes[h] = f.name
+
+            dcm = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
+            sop = str(getattr(dcm, "SOPInstanceUID", "") or "")
+            if sop:
+                if sop in seen_sops:
+                    logger.info(f"Removing duplicate DICOM file {f.name} (identical SOPInstanceUID {sop} to {seen_sops[sop]})")
+                    f.unlink()
+                    removed.append(f.name)
+                    continue
+                seen_sops[sop] = f.name
+        except Exception as e:
+            logger.debug(f"Error checking duplicate for {f}: {e}")
+            continue
+
+    return removed

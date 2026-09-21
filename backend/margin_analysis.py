@@ -81,7 +81,7 @@ def resolve_rtplan(store, want_uid):
         return None
     if want_uid:
         exact = [p for p, u in cands if u == str(want_uid)]
-        if len(exact) == 1:
+        if exact:
             return exact[0]
         return None
     return cands[0][0] if len(cands) == 1 else None

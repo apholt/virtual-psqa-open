@@ -36,7 +36,7 @@ def _set_plan_status(db, plan_id: int, status: str) -> None:
         db.commit()
 
 
-def run_qa_job(job_id: int) -> None:
+def run_qa_job(job_id: int, force: bool = False) -> None:
     """Entry point for a background QA job. Manages its own DB session."""
     db = SessionLocal()
     try:
@@ -66,7 +66,7 @@ def run_qa_job(job_id: int) -> None:
         _set_plan_status(db, job.plan_id, "running")
         if is_cancelled(job_id):
             raise JobCancelled()
-        result_path = _dispatch(job, db)
+        result_path = _dispatch(job, db, force=force)
 
         # Guard: a gamma job that "succeeds" but persisted zero result rows is
         # an error, not a completion. Without this, an empty run goes green and
@@ -92,7 +92,6 @@ def run_qa_job(job_id: int) -> None:
         db.commit()
 
         # If an MCsquare job completes, automatically calculate gamma against TPS
-        # and trigger robustness analysis with DVH predictions
         if job.job_type == "mcSquare":
             try:
                 from services.gamma_analysis import run_gamma_analysis
@@ -100,13 +99,6 @@ def run_qa_job(job_id: int) -> None:
                 run_gamma_analysis(job.plan_id, db)
             except Exception as exc:
                 logger.warning(f"Auto gamma analysis after MCsquare for plan {job.plan_id} failed: {exc}")
-
-            try:
-                from services.dvh_service import calculate_plan_dvh_and_robustness
-                logger.info(f"Auto-running DVH and robustness calculation after MCsquare for plan {job.plan_id}...")
-                calculate_plan_dvh_and_robustness(job.plan_id, db, force_recompute=True)
-            except Exception as exc:
-                logger.warning(f"Auto DVH/robustness calculation for plan {job.plan_id} failed: {exc}")
 
         # GATE_VERDICT_V1 -- every completed job changes the evidence, so
         # re-evaluate the gate and let it own plan.qa_status. This covers jobs
@@ -120,12 +112,41 @@ def run_qa_job(job_id: int) -> None:
             _set_plan_status(db, job.plan_id, "pending")
         logger.info(f"Job {job_id} ({job.job_type}) complete -> {result_path}")
     except JobCancelled:
-        logger.info(f"Job {job_id} cancelled by user")
+        logger.info(f"Job {job_id} cancelled/stopped by user")
         job = db.query(QAJob).filter_by(id=job_id).first()
         if job:
             job.status = "cancelled"
-            job.error_message = "Cancelled by user"
             job.completed_at = datetime.utcnow()
+
+            if job.job_type == "mcSquare":
+                mc_dir = Path(settings.RESULTS_PATH) / f"plan_{job.plan_id}" / "mcSquare_output"
+                completed_beams = list(mc_dir.glob("mc_dose_beam*.npz")) if mc_dir.exists() else []
+                k = len(completed_beams)
+                plan = db.query(Plan).filter_by(id=job.plan_id).first()
+                total_beams = plan.number_of_fields if plan else None
+                composite_file = mc_dir / "mc_dose.npz"
+                if composite_file.is_file() and k > 0:
+                    job.result_path = str(composite_file)
+
+                if k > 0 and total_beams and total_beams > 0:
+                    job.error_message = f"Stopped by user ({k} of {total_beams} beam doses completed)"
+                    job.progress = round(k / total_beams, 2)
+                elif k > 0:
+                    job.error_message = f"Stopped by user ({k} beam dose(s) completed)"
+                else:
+                    job.error_message = "Stopped by user (0 beams completed)"
+
+                # Run partial gamma analysis so user can immediately inspect completed beams!
+                if k > 0:
+                    try:
+                        from services.gamma_analysis import run_gamma_analysis
+                        logger.info(f"Running partial gamma analysis for stopped MCsquare job on plan {job.plan_id} ({k} beams)...")
+                        run_gamma_analysis(job.plan_id, db)
+                    except Exception as exc:
+                        logger.warning(f"Partial gamma analysis after stopped MCsquare failed: {exc}")
+            else:
+                job.error_message = "Cancelled by user"
+
             if job.job_type.startswith("synthetic_") and job.fraction_number:
                 from models.synthetic_ct import SyntheticCT
                 sct = (
@@ -135,7 +156,7 @@ def run_qa_job(job_id: int) -> None:
                 )
                 if sct and sct.status in ("generating", "running", "queued"):
                     sct.status = "cancelled"
-                    sct.error_message = "Cancelled by user"
+                    sct.error_message = job.error_message or "Cancelled by user"
             db.commit()
             _set_plan_status(db, job.plan_id, "pending")
     except Exception as exc:  # noqa: BLE001
@@ -162,7 +183,7 @@ def run_qa_job(job_id: int) -> None:
         db.close()
 
 
-def _dispatch(job: QAJob, db) -> str:
+def _dispatch(job: QAJob, db, force: bool = False) -> str:
     """Runs the appropriate service for the job type and returns the result path."""
     from services.mcSquare_runner import build_mcSquare_input, run_mcSquare
     from services.log_reconstructor import reconstruct_dose_from_log
@@ -171,7 +192,7 @@ def _dispatch(job: QAJob, db) -> str:
     if job.job_type == "mcSquare":
         input_dir = build_mcSquare_input(plan_id, db)
         output_dir = str(Path(settings.RESULTS_PATH) / f"plan_{plan_id}" / "mcSquare_output")
-        return run_mcSquare(input_dir, output_dir, job.id, db)
+        return run_mcSquare(input_dir, output_dir, job.id, db, force=force)
     if job.job_type == "log_reconstruction":
         # Pass the job's own fraction number (set by run_stage2 at creation)
         # so the log-vs-Rx gamma is stored against the true delivered fraction

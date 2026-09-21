@@ -139,16 +139,14 @@ def resolve_rtplan(store, want_uid):
 
     if want_uid:
         exact = [c for c in cands if c[1] == str(want_uid)]
-        if len(exact) == 1:
-            note = "uid match"
+        if len(exact) >= 1:
+            note = f"uid match ({len(exact)} files share uid {want_uid})" if len(exact) > 1 else "uid match"
             foreign = [c for c in cands if c[1] != str(want_uid)]
             if foreign:
                 note += f"; WARNING {len(foreign)} foreign RTPLAN(s) in store: "
                 note += ", ".join(f"{os.path.basename(p)} (patient {pt})"
                                   for p, _, pt in foreign)
             return exact[0][0], note
-        if len(exact) > 1:
-            return None, f"{len(exact)} files share uid {want_uid}"
 
     if len(cands) == 1:
         p, uid, pt = cands[0]
