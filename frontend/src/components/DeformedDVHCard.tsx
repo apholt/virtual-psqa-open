@@ -14,6 +14,7 @@ import {
 import toast from "react-hot-toast";
 import { getSyntheticCTDVH, syntheticCTReportUrl } from "../api/client";
 import type {
+  ComparisonReference,
   DeformedOARCoverage,
   DeformedTargetCoverage,
   SyntheticCTDVHResponse,
@@ -25,6 +26,9 @@ export interface DeformedDVHCardProps {
   hasDose?: boolean;
   hasDvh?: boolean;
   className?: string;
+  activeReference?: string;
+  onReferenceChange?: (ref: string) => void;
+  availableReferences?: ComparisonReference[];
 }
 
 const PALETTE = [
@@ -46,6 +50,9 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
   hasDose = false,
   hasDvh = false,
   className = "",
+  activeReference = "tps",
+  onReferenceChange,
+  availableReferences,
 }) => {
   const [data, setData] = useState<SyntheticCTDVHResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -53,6 +60,12 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
   const [selectedRois, setSelectedRois] = useState<Set<number>>(new Set());
   const [plotMode, setPlotMode] = useState<"targets" | "oars" | "side_by_side">("targets");
   const [hoverDose, setHoverDose] = useState<number | null>(null);
+
+  const isMCReference = activeReference === "mcsquare" || activeReference === "mcsquare_prev";
+  const refLabel = isMCReference
+    ? (activeReference === "mcsquare_prev" ? "Prior Fraction MC" : "Baseline MCsquare")
+    : "Planned TPS";
+  const shortRefLabel = isMCReference ? "MC Ref" : "Plan";
 
   const targetSvgRef = useRef<SVGSVGElement | null>(null);
   const oarSvgRef = useRef<SVGSVGElement | null>(null);
@@ -183,9 +196,11 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
   // Helper to interpolate volume % at hover dose
   const getVolumeAtDose = (roi: DeformedTargetCoverage | DeformedOARCoverage, dose: number) => {
     const bins = roi.dvh.dose_bins_gy;
-    const tps = roi.dvh.tps_volume_pct;
+    const refVol = isMCReference && roi.dvh.mcsquare_volume_pct && roi.dvh.mcsquare_volume_pct.length > 0
+      ? roi.dvh.mcsquare_volume_pct
+      : roi.dvh.tps_volume_pct;
     const sct = roi.dvh.sct_volume_pct;
-    if (!bins || bins.length === 0) return { tps: 0, sct: 0 };
+    if (!bins || bins.length === 0) return { ref: 0, sct: 0 };
 
     // Find nearest bin
     let idx = 0;
@@ -198,7 +213,7 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
       }
     }
     return {
-      tps: tps[idx] ?? 0,
+      ref: refVol[idx] ?? 0,
       sct: sct[idx] ?? 0,
     };
   };
@@ -368,12 +383,14 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
           <g clipPath={`url(#${clipId}-${chartTitle.replace(/\s+/g, "_")})`}>
             {visibleStructures.map((roi, idx) => {
               const bins = roi.dvh.dose_bins_gy;
-              const tps = roi.dvh.tps_volume_pct;
+              const refVol = isMCReference && roi.dvh.mcsquare_volume_pct && roi.dvh.mcsquare_volume_pct.length > 0
+                ? roi.dvh.mcsquare_volume_pct
+                : roi.dvh.tps_volume_pct;
               const sct = roi.dvh.sct_volume_pct;
               const color = roi.color || PALETTE[idx % PALETTE.length];
 
-              const tpsPoints = bins
-                .map((d, i) => `${scalers.scaleX(d)},${scalers.scaleY(tps[i])}`)
+              const refPoints = bins
+                .map((d, i) => `${scalers.scaleX(d)},${scalers.scaleY(refVol[i])}`)
                 .join(" L ");
               const sctPoints = bins
                 .map((d, i) => `${scalers.scaleX(d)},${scalers.scaleY(sct[i])}`)
@@ -381,9 +398,9 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
 
               return (
                 <g key={roi.roi_number}>
-                  {/* TPS Planned (Dashed) */}
+                  {/* Reference Planned / Baseline (Dashed) */}
                   <path
-                    d={`M ${tpsPoints}`}
+                    d={`M ${refPoints}`}
                     fill="none"
                     stroke={color}
                     strokeWidth={1.75}
@@ -426,16 +443,16 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
             {visibleStructures.map((roi) => {
               const vols = getVolumeAtDose(roi, hoverDose);
               const color = roi.color || "#3b82f6";
-              const diff = vols.sct - vols.tps;
+              const diff = vols.sct - vols.ref;
               return (
                 <div key={roi.roi_number} className="flex items-center gap-1.5 text-[11px]">
                   <span
-                    className="w-2 h-2 rounded-full shrink-0"
+                    className="w-2.5 h-2.5 rounded-full shrink-0"
                     style={{ backgroundColor: color }}
                   />
                   <span className="font-medium text-clinical-text">{roi.name}:</span>
                   <span className="font-mono text-clinical-muted">
-                    sCT {vols.sct.toFixed(1)}% (Plan {vols.tps.toFixed(1)}%,{" "}
+                    sCT {vols.sct.toFixed(1)}% ({shortRefLabel} {vols.ref.toFixed(1)}%,{" "}
                     <span className={diff < -5 ? "text-red-400 font-bold" : diff > 5 ? "text-amber-400" : "text-clinical-muted"}>
                       {diff >= 0 ? `+${diff.toFixed(1)}%` : `${diff.toFixed(1)}%`}
                     </span>
@@ -534,6 +551,11 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
               Fraction {fractionNumber}
             </span>
 
+            {/* Active Reference Badge */}
+            <span className="text-[11px] px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30 font-semibold flex items-center gap-1">
+              Ref: {refLabel}
+            </span>
+
             {/* Overall Verdict Pill */}
             <span
               className={`px-2.5 py-0.5 rounded text-xs font-bold uppercase tracking-wide border flex items-center gap-1.5 ${
@@ -561,13 +583,45 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
 
           <p className="text-xs text-clinical-muted mt-1.5">
             Planning contours resampled onto daily CBCT anatomy via Deformable Image Registration (DIR).
-            Dose evaluated on deformed target masks vs reference TPS baseline.
+            Dose evaluated on deformed target masks vs{" "}
+            <strong className="text-clinical-text">
+              {isMCReference ? "baseline/prior openMCsquare simulation" : "nominal planned TPS baseline"}
+            </strong>.
             {data.prescription_dose_gy ? ` Reference Rx: ${data.prescription_dose_gy.toFixed(1)} Gy.` : ""}
           </p>
         </div>
 
-        {/* Action Buttons */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Action Buttons & Reference Toggle */}
+        <div className="flex items-center gap-2 flex-wrap shrink-0">
+          {onReferenceChange && (
+            <div className="flex items-center gap-1 bg-clinical-card p-0.5 rounded-lg border border-clinical-border text-xs">
+              {(availableReferences && availableReferences.length > 0
+                ? availableReferences
+                : [
+                    { id: "tps", name: "Planned TPS", short_name: "Plan" },
+                    { id: "mcsquare", name: "Baseline MC", short_name: "MC" },
+                  ]
+              ).map((ref) => {
+                const isSel = activeReference === ref.id;
+                return (
+                  <button
+                    key={ref.id}
+                    onClick={() => onReferenceChange(ref.id)}
+                    className={`px-2.5 py-1 rounded font-medium transition-colors ${
+                      isSel
+                        ? "bg-blue-600 text-white shadow-xs"
+                        : "text-clinical-muted hover:text-clinical-text"
+                    }`}
+                    title={ref.description || `Compare against ${ref.name}`}
+                  >
+                    {ref.id === "tps" ? "🎯 " : ref.id === "mcsquare_prev" ? "⏮️ " : "⚡ "}
+                    {ref.name || ref.short_name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           <button
             onClick={() => loadDVH(true)}
             disabled={recomputing}
@@ -662,11 +716,11 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
         <div className="flex items-center gap-4 text-xs text-clinical-muted">
           <div className="flex items-center gap-1.5">
             <span className="w-4 h-0.5 border-t-2 border-dashed border-clinical-muted/70" />
-            <span className="text-[11px]">Planned TPS (Reference)</span>
+            <span className="text-[11px]">{refLabel} (Dashed)</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="w-4 h-0.5 bg-clinical-text rounded" />
-            <span className="text-[11px] font-semibold text-clinical-text">Daily sCT (Deformed)</span>
+            <span className="text-[11px] font-semibold text-clinical-text">Daily sCT MC (Solid)</span>
           </div>
         </div>
 
@@ -748,7 +802,7 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
           targetSvgRef,
           800,
           360,
-          "Deformed Target Volume Coverage (Dashed: Plan, Solid: Daily sCT)",
+          `Deformed Target Volume Coverage (Dashed: ${shortRefLabel}, Solid: Daily sCT)`,
           true
         )
       )}
@@ -759,7 +813,7 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
           oarSvgRef,
           800,
           360,
-          "Critical Organs-At-Risk Sparing (Dashed: Plan, Solid: Daily sCT)",
+          `Critical Organs-At-Risk Sparing (Dashed: ${shortRefLabel}, Solid: Daily sCT)`,
           false
         )
       )}
@@ -771,7 +825,7 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
             targetSvgRef,
             500,
             330,
-            "Targets (Deformed Anatomy)",
+            `Targets (vs ${shortRefLabel})`,
             true
           )}
           {renderSvgChart(
@@ -779,7 +833,7 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
             oarSvgRef,
             500,
             330,
-            "Organs at Risk (Deformed Anatomy)",
+            `Organs at Risk (vs ${shortRefLabel})`,
             false
           )}
         </div>
@@ -807,11 +861,11 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
                   <th className="py-2.5 px-3">Target Structure</th>
                   <th className="py-2.5 px-3">Volume (Plan &rarr; sCT)</th>
                   <th className="py-2.5 px-3">&Delta; Vol %</th>
-                  <th className="py-2.5 px-3">D95 (Plan &rarr; sCT)</th>
+                  <th className="py-2.5 px-3">D95 ({shortRefLabel} &rarr; sCT)</th>
                   <th className="py-2.5 px-3">&Delta; D95</th>
-                  <th className="py-2.5 px-3">V95% (Plan &rarr; sCT)</th>
+                  <th className="py-2.5 px-3">V95% ({shortRefLabel} &rarr; sCT)</th>
                   <th className="py-2.5 px-3">&Delta; V95%</th>
-                  <th className="py-2.5 px-3">Dmean (Plan &rarr; sCT)</th>
+                  <th className="py-2.5 px-3">Dmean ({shortRefLabel} &rarr; sCT)</th>
                   <th className="py-2.5 px-3">Status</th>
                   <th className="py-2.5 px-3 min-w-[200px]">Clinical Evaluation</th>
                 </tr>
@@ -819,6 +873,8 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
               <tbody className="divide-y divide-clinical-border/60">
                 {allTargets.map((t, idx) => {
                   const color = t.color || PALETTE[idx % PALETTE.length];
+                  const refM = isMCReference && t.mcsquare_metrics ? t.mcsquare_metrics : t.planned_metrics;
+                  const deltaM = isMCReference && t.delta_mcsquare_metrics ? t.delta_mcsquare_metrics : t.delta_metrics;
                   return (
                     <tr key={t.roi_number} className="hover:bg-clinical-card/40 transition-colors">
                       <td className="py-2.5 px-3 font-medium text-clinical-text flex items-center gap-2">
@@ -848,7 +904,7 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
                         </span>
                       </td>
                       <td className="py-2.5 px-3 font-mono text-clinical-muted">
-                        {t.planned_metrics.d95.toFixed(1)} &rarr;{" "}
+                        {refM.d95.toFixed(1)} &rarr;{" "}
                         <span className="text-clinical-text font-semibold">
                           {t.deformed_metrics.d95.toFixed(1)} Gy
                         </span>
@@ -856,21 +912,21 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
                       <td className="py-2.5 px-3 font-mono font-medium">
                         <span
                           className={
-                            t.delta_metrics.d95 < -2.0
+                            deltaM.d95 < -2.0
                               ? "text-red-400 font-bold"
-                              : t.delta_metrics.d95 < 0
+                              : deltaM.d95 < 0
                               ? "text-amber-400"
                               : "text-emerald-400"
                           }
                         >
-                          {t.delta_metrics.d95 >= 0
-                            ? `+${t.delta_metrics.d95.toFixed(1)}`
-                            : t.delta_metrics.d95.toFixed(1)}{" "}
+                          {deltaM.d95 >= 0
+                            ? `+${deltaM.d95.toFixed(1)}`
+                            : deltaM.d95.toFixed(1)}{" "}
                           Gy
                         </span>
                       </td>
                       <td className="py-2.5 px-3 font-mono text-clinical-muted">
-                        {(t.planned_metrics.v95_pct ?? 0).toFixed(1)}% &rarr;{" "}
+                        {(refM.v95_pct ?? 0).toFixed(1)}% &rarr;{" "}
                         <span className="text-clinical-text font-semibold">
                           {(t.deformed_metrics.v95_pct ?? 0).toFixed(1)}%
                         </span>
@@ -878,20 +934,20 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
                       <td className="py-2.5 px-3 font-mono font-medium">
                         <span
                           className={
-                            t.delta_metrics.v95_pct < -5.0
+                            deltaM.v95_pct < -5.0
                               ? "text-red-400 font-bold"
-                              : t.delta_metrics.v95_pct < 0
+                              : deltaM.v95_pct < 0
                               ? "text-amber-400"
                               : "text-emerald-400"
                           }
                         >
-                          {t.delta_metrics.v95_pct >= 0
-                            ? `+${t.delta_metrics.v95_pct.toFixed(1)}%`
-                            : `${t.delta_metrics.v95_pct.toFixed(1)}%`}
+                          {deltaM.v95_pct >= 0
+                            ? `+${deltaM.v95_pct.toFixed(1)}%`
+                            : `${deltaM.v95_pct.toFixed(1)}%`}
                         </span>
                       </td>
                       <td className="py-2.5 px-3 font-mono text-clinical-muted">
-                        {t.planned_metrics.d_mean.toFixed(1)} &rarr;{" "}
+                        {refM.d_mean.toFixed(1)} &rarr;{" "}
                         {t.deformed_metrics.d_mean.toFixed(1)} Gy
                       </td>
                       <td className="py-2.5 px-3">
@@ -941,9 +997,9 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
                   <th className="py-2.5 px-3">OAR Structure</th>
                   <th className="py-2.5 px-3">Volume (Plan &rarr; sCT)</th>
                   <th className="py-2.5 px-3">&Delta; Vol %</th>
-                  <th className="py-2.5 px-3">Dmean (Plan &rarr; sCT)</th>
+                  <th className="py-2.5 px-3">Dmean ({shortRefLabel} &rarr; sCT)</th>
                   <th className="py-2.5 px-3">&Delta; Dmean</th>
-                  <th className="py-2.5 px-3">D2% Near-Max (Plan &rarr; sCT)</th>
+                  <th className="py-2.5 px-3">D2% Near-Max ({shortRefLabel} &rarr; sCT)</th>
                   <th className="py-2.5 px-3">&Delta; D2%</th>
                   <th className="py-2.5 px-3">Status</th>
                   <th className="py-2.5 px-3 min-w-[200px]">Sparing Evaluation</th>
@@ -952,6 +1008,8 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
               <tbody className="divide-y divide-clinical-border/60">
                 {allOars.map((o, idx) => {
                   const color = o.color || PALETTE[(allTargets.length + idx) % PALETTE.length];
+                  const refM = isMCReference && o.mcsquare_metrics ? o.mcsquare_metrics : o.planned_metrics;
+                  const deltaM = isMCReference && o.delta_mcsquare_metrics ? o.delta_mcsquare_metrics : o.delta_metrics;
                   return (
                     <tr key={o.roi_number} className="hover:bg-clinical-card/40 transition-colors">
                       <td className="py-2.5 px-3 font-medium text-clinical-text flex items-center gap-2">
@@ -973,7 +1031,7 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
                           : `${o.volume_change_pct.toFixed(1)}%`}
                       </td>
                       <td className="py-2.5 px-3 font-mono text-clinical-muted">
-                        {o.planned_metrics.d_mean.toFixed(1)} &rarr;{" "}
+                        {refM.d_mean.toFixed(1)} &rarr;{" "}
                         <span className="text-clinical-text font-semibold">
                           {o.deformed_metrics.d_mean.toFixed(1)} Gy
                         </span>
@@ -981,36 +1039,36 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
                       <td className="py-2.5 px-3 font-mono font-medium">
                         <span
                           className={
-                            o.delta_metrics.d_mean > 2.0
+                            deltaM.d_mean > 2.0
                               ? "text-red-400 font-bold"
-                              : o.delta_metrics.d_mean > 0.8
+                              : deltaM.d_mean > 0.8
                               ? "text-amber-400"
                               : "text-emerald-400"
                           }
                         >
-                          {o.delta_metrics.d_mean >= 0
-                            ? `+${o.delta_metrics.d_mean.toFixed(1)}`
-                            : o.delta_metrics.d_mean.toFixed(1)}{" "}
+                          {deltaM.d_mean >= 0
+                            ? `+${deltaM.d_mean.toFixed(1)}`
+                            : deltaM.d_mean.toFixed(1)}{" "}
                           Gy
                         </span>
                       </td>
                       <td className="py-2.5 px-3 font-mono text-clinical-muted">
-                        {o.planned_metrics.d2.toFixed(1)} &rarr;{" "}
+                        {refM.d2.toFixed(1)} &rarr;{" "}
                         {o.deformed_metrics.d2.toFixed(1)} Gy
                       </td>
                       <td className="py-2.5 px-3 font-mono font-medium">
                         <span
                           className={
-                            o.delta_metrics.d2 > 3.0
+                            deltaM.d2 > 3.0
                               ? "text-red-400 font-bold"
-                              : o.delta_metrics.d2 > 1.0
+                              : deltaM.d2 > 1.0
                               ? "text-amber-400"
                               : "text-clinical-muted"
                           }
                         >
-                          {o.delta_metrics.d2 >= 0
-                            ? `+${o.delta_metrics.d2.toFixed(1)}`
-                            : o.delta_metrics.d2.toFixed(1)}{" "}
+                          {deltaM.d2 >= 0
+                            ? `+${deltaM.d2.toFixed(1)}`
+                            : deltaM.d2.toFixed(1)}{" "}
                           Gy
                         </span>
                       </td>

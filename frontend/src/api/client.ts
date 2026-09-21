@@ -366,6 +366,27 @@ export const getSyntheticCTDVH = (planId: number, fractionNumber: number, recomp
     )
     .then((r) => r.data);
 
+export const getSyntheticCTGammaPlaneUrl = (
+  planId: number,
+  fractionNumber: number,
+  z: number,
+  reference: string = "tps"
+) => `/api/plans/${planId}/synthetic-ct/${fractionNumber}/gamma/plane/${z}?reference=${encodeURIComponent(reference)}`;
+
+export const getSyntheticCTRefDosePlaneUrl = (
+  planId: number,
+  fractionNumber: number,
+  z: number,
+  reference: string = "tps"
+) => `/api/plans/${planId}/synthetic-ct/${fractionNumber}/ref-dose/plane/${z}?reference=${encodeURIComponent(reference)}`;
+
+export const getSyntheticCTDoseDiffPlaneUrl = (
+  planId: number,
+  fractionNumber: number,
+  z: number,
+  reference: string = "tps"
+) => `/api/plans/${planId}/synthetic-ct/${fractionNumber}/dose-diff/plane/${z}?reference=${encodeURIComponent(reference)}`;
+
 export const syntheticCTReportUrl = (
   planId: number,
   fractionNumber?: number,

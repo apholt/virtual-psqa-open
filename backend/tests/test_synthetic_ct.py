@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -290,7 +291,58 @@ def test_synthetic_ct_full_pipeline():
         assert res_gamma_plane.status_code == 200
         assert "X-Passing-Rate" in res_gamma_plane.headers
 
-        print("[SUCCESS] All SyntheticQACT, CBCT, and Deformed DVH pipeline tests passed!")
+        # 10. Test Multi-Reference Comparison (TPS vs Baseline MCsquare)
+        # Create baseline MC dose in mcSquare_output
+        plan_mc_dir = Path(settings.RESULTS_PATH) / f"plan_{plan_id}" / "mcSquare_output"
+        plan_mc_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(mc_path, plan_mc_dir / "mc_dose.npz")
+
+        # Test detail endpoint with comparisons
+        res_detail_2 = client.get(f"/api/plans/{plan_id}/synthetic-ct/1")
+        assert res_detail_2.status_code == 200
+        detail_2 = res_detail_2.json()
+        assert "available_references" in detail_2
+        assert any(r["id"] == "tps" for r in detail_2["available_references"])
+        assert any(r["id"] == "mcsquare" for r in detail_2["available_references"])
+        assert "comparisons" in detail_2
+        assert "tps" in detail_2["comparisons"]
+        assert "mcsquare" in detail_2["comparisons"]
+
+        # Test Reference Dose Plane (TPS and MCsquare)
+        res_ref_tps = client.get(f"/api/plans/{plan_id}/synthetic-ct/1/ref-dose/plane/0?reference=tps")
+        assert res_ref_tps.status_code == 200
+        assert "X-Max-Dose" in res_ref_tps.headers
+
+        res_ref_mc = client.get(f"/api/plans/{plan_id}/synthetic-ct/1/ref-dose/plane/0?reference=mcsquare")
+        assert res_ref_mc.status_code == 200
+        assert "X-Max-Dose" in res_ref_mc.headers
+
+        # Test Dose Difference Plane
+        res_diff_tps = client.get(f"/api/plans/{plan_id}/synthetic-ct/1/dose-diff/plane/0?reference=tps")
+        assert res_diff_tps.status_code == 200
+        assert "X-Max-Diff" in res_diff_tps.headers
+
+        res_diff_mc = client.get(f"/api/plans/{plan_id}/synthetic-ct/1/dose-diff/plane/0?reference=mcsquare")
+        assert res_diff_mc.status_code == 200
+        assert "X-Max-Diff" in res_diff_mc.headers
+
+        # Test Gamma against MCsquare
+        res_gamma_mc = client.get(f"/api/plans/{plan_id}/synthetic-ct/1/gamma/plane/0?reference=mcsquare")
+        assert res_gamma_mc.status_code == 200
+        assert "X-Passing-Rate" in res_gamma_mc.headers
+        assert float(res_gamma_mc.headers["X-Passing-Rate"]) >= 95.0
+
+        # Test DVH includes mcsquare comparison
+        res_dvh_mc = client.get(f"/api/plans/{plan_id}/synthetic-ct/1/dvh?recompute=true")
+        assert res_dvh_mc.status_code == 200
+        dvh_data_mc = res_dvh_mc.json()
+        assert "available_references" in dvh_data_mc
+        if dvh_data_mc.get("targets"):
+            t0 = dvh_data_mc["targets"][0]
+            assert "mcsquare_volume_pct" in t0["dvh"]
+            assert "mcsquare_metrics" in t0
+
+        print("[SUCCESS] All SyntheticQACT, CBCT, Deformed DVH, and Multi-Reference Comparison tests passed!")
     finally:
         db.close()
 

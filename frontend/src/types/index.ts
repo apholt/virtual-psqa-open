@@ -431,11 +431,33 @@ export interface SyntheticCTSummary {
   calculated_at: string | null;
 }
 
+export interface ComparisonReference {
+  id: "tps" | "mcsquare" | "mcsquare_prev" | string;
+  name: string;
+  short_name: string;
+  label?: string;
+  description?: string;
+  is_default?: boolean;
+}
+
+export interface ComparisonMetrics {
+  reference: string;
+  reference_name: string;
+  reference_label?: string;
+  gamma_passing_rate: number | null;
+  gamma_2mm_passing_rate: number | null;
+  gamma_passed: boolean | null;
+  mean_dose_diff_pct: number | null;
+  max_dose_diff_pct: number | null;
+}
+
 export interface SyntheticCTDetail extends SyntheticCTSummary {
   plan_id: number;
   study_instance_uid: string | null;
   error_message: string | null;
   has_dose: boolean;
+  available_references?: ComparisonReference[];
+  comparisons?: Record<string, ComparisonMetrics>;
 }
 
 export interface DeformedDVHMetrics {
@@ -454,6 +476,7 @@ export interface DeformedDVHCurve {
   dose_bins_gy: number[];
   tps_volume_pct: number[];
   sct_volume_pct: number[];
+  mcsquare_volume_pct?: number[] | null;
 }
 
 export interface DeformedTargetCoverage {
@@ -479,6 +502,17 @@ export interface DeformedTargetCoverage {
     v100_pct: number;
     volume_change_pct: number;
   };
+  mcsquare_metrics?: DeformedDVHMetrics | null;
+  delta_mcsquare_metrics?: {
+    d98: number;
+    d95: number;
+    d50: number;
+    d2: number;
+    d_mean: number;
+    v95_pct: number;
+    v100_pct: number;
+    volume_change_pct: number;
+  } | null;
   dvh: DeformedDVHCurve;
 }
 
@@ -501,6 +535,13 @@ export interface DeformedOARCoverage {
     d_max: number;
     volume_change_pct: number;
   };
+  mcsquare_metrics?: DeformedDVHMetrics | null;
+  delta_mcsquare_metrics?: {
+    d2: number;
+    d_mean: number;
+    d_max: number;
+    volume_change_pct: number;
+  } | null;
   dvh: DeformedDVHCurve;
 }
 
@@ -513,6 +554,7 @@ export interface SyntheticCTDVHResponse {
   overall_note: string;
   num_targets: number;
   num_oars: number;
+  available_references?: ComparisonReference[];
   targets: DeformedTargetCoverage[];
   oars: DeformedOARCoverage[];
 }

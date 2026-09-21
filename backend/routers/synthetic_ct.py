@@ -28,10 +28,12 @@ from services.synthetic_ct_service import (
     generate_synthetic_ct,
     get_cbct_image_plane,
     get_sct_dose_plane,
+    get_sct_dose_diff_plane,
     get_sct_external_info,
     get_sct_external_plane,
     get_sct_gamma_plane,
     get_sct_image_plane,
+    get_sct_reference_dose_plane,
     get_synthetic_ct_detail,
     ingest_cbct_series,
     ingest_synthetic_ct_files,
@@ -371,11 +373,12 @@ def get_fraction_gamma_plane(
     plan_id: int,
     fraction_number: int,
     z: int,
+    reference: str = Query("tps", description="Comparison reference: 'tps', 'mcsquare', or 'mcsquare_prev'"),
     db: Session = Depends(get_db),
 ):
-    """Stream binary float32 slice of 3D Gamma evaluation on the synthetic CT."""
+    """Stream binary float32 slice of 3D Gamma evaluation against selected reference."""
     try:
-        plane, passing_rate = get_sct_gamma_plane(plan_id, fraction_number, z, db)
+        plane, passing_rate = get_sct_gamma_plane(plan_id, fraction_number, z, db, reference=reference)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
@@ -389,9 +392,71 @@ def get_fraction_gamma_plane(
             "X-Rows": str(buf.shape[0]),
             "X-Cols": str(buf.shape[1]),
             "X-Passing-Rate": str(round(passing_rate, 2)),
-            "Access-Control-Expose-Headers": "X-Rows,X-Cols,X-Passing-Rate",
+            "X-Reference": reference,
+            "Access-Control-Expose-Headers": "X-Rows,X-Cols,X-Passing-Rate,X-Reference",
         },
     )
+
+
+@router.get("/{fraction_number}/ref-dose/plane/{z}")
+def get_fraction_reference_dose_plane(
+    plan_id: int,
+    fraction_number: int,
+    z: int,
+    reference: str = Query("tps", description="Comparison reference: 'tps', 'mcsquare', or 'mcsquare_prev'"),
+    db: Session = Depends(get_db),
+):
+    """Stream binary float32 slice of reference dose (TPS or Baseline MC) aligned to synthetic CT."""
+    try:
+        plane, max_dose, ref_name = get_sct_reference_dose_plane(plan_id, fraction_number, z, db, reference=reference)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    buf = plane.astype("<f4")
+    return Response(
+        content=buf.tobytes(),
+        media_type="application/octet-stream",
+        headers={
+            "X-Rows": str(buf.shape[0]),
+            "X-Cols": str(buf.shape[1]),
+            "X-Max-Dose": str(round(max_dose, 4)),
+            "X-Reference": ref_name,
+            "Access-Control-Expose-Headers": "X-Rows,X-Cols,X-Max-Dose,X-Reference",
+        },
+    )
+
+
+@router.get("/{fraction_number}/dose-diff/plane/{z}")
+def get_fraction_dose_diff_plane(
+    plan_id: int,
+    fraction_number: int,
+    z: int,
+    reference: str = Query("tps", description="Comparison reference: 'tps', 'mcsquare', or 'mcsquare_prev'"),
+    db: Session = Depends(get_db),
+):
+    """Stream binary float32 slice of relative % dose difference ((sCT - Ref) / MaxDose * 100)."""
+    try:
+        plane, max_diff, ref_name = get_sct_dose_diff_plane(plan_id, fraction_number, z, db, reference=reference)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    buf = plane.astype("<f4")
+    return Response(
+        content=buf.tobytes(),
+        media_type="application/octet-stream",
+        headers={
+            "X-Rows": str(buf.shape[0]),
+            "X-Cols": str(buf.shape[1]),
+            "X-Max-Diff": str(round(max_diff, 2)),
+            "X-Reference": ref_name,
+            "Access-Control-Expose-Headers": "X-Rows,X-Cols,X-Max-Diff,X-Reference",
+        },
+    )
+
 
 
 class RecomputeExternalRequest(BaseModel):

@@ -211,6 +211,255 @@ def _expand_source_paths(source_paths: list[Union[str, Path]], temp_extract_dir:
     return expanded
 
 
+def find_baseline_mcsquare_dose_path(plan_id: int, db: Optional[Session] = None) -> Optional[Path]:
+    """Locate the baseline pre-treatment MCsquare simulation dose for the plan if available."""
+    candidates: list[Path] = []
+    results_base = Path(settings.RESULTS_PATH)
+    if not results_base.is_absolute():
+        backend_dir = Path(__file__).resolve().parent.parent
+        candidates.append((backend_dir / results_base).resolve() / f"plan_{plan_id}" / "mcSquare_output" / "mc_dose.npz")
+        candidates.append(results_base.resolve() / f"plan_{plan_id}" / "mcSquare_output" / "mc_dose.npz")
+    else:
+        candidates.append(results_base / f"plan_{plan_id}" / "mcSquare_output" / "mc_dose.npz")
+
+    for direct_path in candidates:
+        if direct_path.is_file() and direct_path.stat().st_size > 1000:
+            return direct_path
+
+    if db is not None:
+        from models.qa_job import QAJob
+        job = (
+            db.query(QAJob)
+            .filter(QAJob.plan_id == plan_id, QAJob.job_type == "mcSquare", QAJob.status == "completed")
+            .order_by(QAJob.id.desc())
+            .first()
+        )
+        if job and job.output_dir:
+            job_dose = Path(job.output_dir) / "mc_dose.npz"
+            if job_dose.is_file() and job_dose.stat().st_size > 1000:
+                return job_dose
+    return None
+
+
+def find_previous_fraction_mcsquare_dose_path(plan_id: int, fraction_number: int, db: Session) -> Optional[tuple[int, Path]]:
+    """Find the most recent prior fraction with a completed MC dose calculation."""
+    for prev_fx in range(fraction_number - 1, 0, -1):
+        prev_dose = _sct_dir(plan_id, prev_fx) / "output" / "mc_dose_sct.npz"
+        if prev_dose.is_file() and prev_dose.stat().st_size > 1000:
+            return prev_fx, prev_dose
+        sct = db.query(SyntheticCT).filter_by(plan_id=plan_id, fraction_number=prev_fx).first()
+        if sct and sct.dose_path and Path(sct.dose_path).is_file() and Path(sct.dose_path).stat().st_size > 1000:
+            return prev_fx, Path(sct.dose_path)
+    return None
+
+
+def get_available_comparison_references(plan_id: int, fraction_number: int, db: Session) -> list[dict[str, Any]]:
+    """Returns metadata for all available reference doses that adaptive dose can be compared against."""
+    refs: list[dict[str, Any]] = []
+
+    # 1. Planned TPS Dose
+    plan = db.query(Plan).filter_by(id=plan_id).first()
+    rtdose_path = find_rtdose_file(plan.dicom_store_path, plan_uid=plan.rtplan_uid) if plan and plan.dicom_store_path else None
+    if rtdose_path and Path(rtdose_path).is_file():
+        refs.append({
+            "id": "tps",
+            "name": "Planned TPS Dose",
+            "short_name": "Planned TPS",
+            "description": "Nominal reference dose calculated by the treatment planning system",
+            "is_default": True,
+        })
+
+    # 2. Baseline MCsquare Dose (Pre-treatment simulation on planning CT)
+    mc_base_path = find_baseline_mcsquare_dose_path(plan_id, db)
+    if mc_base_path:
+        refs.append({
+            "id": "mcsquare",
+            "name": "Baseline MCsquare Dose",
+            "short_name": "Baseline MC",
+            "description": "Pre-treatment openMCsquare simulation on planning CT (evaluates pure anatomical changes without dose algorithm bias)",
+            "is_default": False,
+        })
+
+    # 3. Previous Fraction MC Dose (if fraction > 1 and prior fraction exists)
+    if fraction_number > 1:
+        prev_info = find_previous_fraction_mcsquare_dose_path(plan_id, fraction_number, db)
+        if prev_info:
+            prev_fx, _ = prev_info
+            refs.append({
+                "id": "mcsquare_prev",
+                "name": f"Previous Fraction MC (Fx {prev_fx})",
+                "short_name": f"MC Fx {prev_fx}",
+                "description": f"Adaptive openMCsquare dose from Fraction {prev_fx} (fraction-to-fraction anatomy drift)",
+                "is_default": False,
+            })
+
+    if not refs:
+        refs.append({
+            "id": "tps",
+            "name": "Planned TPS Dose",
+            "short_name": "Planned TPS",
+            "description": "Treatment planning system reference dose",
+            "is_default": True,
+        })
+    return refs
+
+
+def resolve_comparison_reference_dose(
+    plan_id: int,
+    fraction_number: int,
+    reference: str,
+    target_grid: Optional[DoseGrid],
+    db: Session,
+) -> tuple[DoseGrid, str]:
+    """
+    Resolves and loads the chosen reference dose grid, resampled to target_grid (or in native grid if target_grid is None).
+    Returns (ref_grid, display_name).
+    """
+    ref_clean = reference.lower().strip()
+    plan = db.query(Plan).filter_by(id=plan_id).first()
+
+    if ref_clean in ("mcsquare", "mcsquare_baseline", "mc", "baseline"):
+        mc_base_path = find_baseline_mcsquare_dose_path(plan_id, db)
+        if not mc_base_path or not mc_base_path.is_file():
+            raise FileNotFoundError(f"Baseline MCsquare dose not found for plan {plan_id}")
+        raw_mc = DoseGrid.load(mc_base_path)
+        ref_grid = _resample_to(raw_mc, target_grid) if target_grid is not None else raw_mc
+        return ref_grid, "Baseline MCsquare Dose"
+
+    elif ref_clean in ("mcsquare_prev", "prev_fx", "previous_fraction"):
+        prev_info = find_previous_fraction_mcsquare_dose_path(plan_id, fraction_number, db)
+        if not prev_info:
+            raise FileNotFoundError(f"No previous fraction MC dose found for plan {plan_id} before fraction {fraction_number}")
+        prev_fx, prev_path = prev_info
+        raw_mc = DoseGrid.load(prev_path)
+        ref_grid = _resample_to(raw_mc, target_grid) if target_grid is not None else raw_mc
+        return ref_grid, f"Previous Fraction MC (Fx {prev_fx})"
+
+    else:
+        # Default: TPS RTDose
+        rtdose_path = find_rtdose_file(plan.dicom_store_path, plan_uid=plan.rtplan_uid) if plan and plan.dicom_store_path else None
+        if not rtdose_path:
+            raise FileNotFoundError(f"No reference TPS RTDose found for plan {plan_id}")
+        tps_grid = load_rtdose(rtdose_path)
+        ref_grid = _resample_to(tps_grid, target_grid) if target_grid is not None else tps_grid
+        return ref_grid, "Planned TPS Dose"
+
+
+def _get_gamma_path(plan_id: int, fraction_number: int, reference: str) -> Path:
+    ref_clean = reference.lower().strip()
+    out_dir = _sct_dir(plan_id, fraction_number) / "output"
+    if ref_clean in ("mcsquare", "mcsquare_baseline", "mc", "baseline"):
+        return out_dir / "gamma_sct_vs_mcsquare.npz"
+    elif ref_clean in ("mcsquare_prev", "prev_fx", "previous_fraction"):
+        return out_dir / "gamma_sct_vs_prev_fx.npz"
+    return out_dir / "gamma_sct_vs_tps.npz"
+
+
+def ensure_comparison_gamma(
+    plan_id: int,
+    fraction_number: int,
+    reference: str,
+    db: Session,
+) -> dict[str, Any]:
+    """
+    Ensures 3D gamma evaluation (3%/3mm and 2%/2mm) and dose diff against the specified reference exists on disk.
+    If not cached, calculates it dynamically and returns summary metrics.
+    """
+    gamma_path = _get_gamma_path(plan_id, fraction_number, reference)
+    if gamma_path.is_file():
+        try:
+            data = np.load(str(gamma_path))
+            return {
+                "reference": reference,
+                "reference_name": str(data.get("reference_name", "Reference Dose")),
+                "gamma_passing_rate": float(data.get("passing_rate", 0.0)),
+                "gamma_2mm_passing_rate": float(data.get("passing_rate_2mm", 0.0)),
+                "gamma_passed": bool(float(data.get("passing_rate", 0.0)) >= 90.0),
+                "mean_dose_diff_pct": float(data.get("mean_dose_diff_pct", 0.0)),
+                "max_dose_diff_pct": float(data.get("max_dose_diff_pct", 0.0)),
+                "gamma_save_path": str(gamma_path),
+            }
+        except Exception as exc:
+            logger.warning(f"Could not load existing gamma file {gamma_path}: {exc}")
+
+    # Calculate dynamically
+    sct = db.query(SyntheticCT).filter_by(plan_id=plan_id, fraction_number=fraction_number).first()
+    if not sct or not sct.dose_path or not Path(sct.dose_path).is_file():
+        raise FileNotFoundError(f"Synthetic CT dose not found for plan {plan_id} fx {fraction_number}")
+
+    plan = db.query(Plan).filter_by(id=plan_id).first()
+    rtdose_path = find_rtdose_file(plan.dicom_store_path, plan_uid=plan.rtplan_uid) if plan and plan.dicom_store_path else None
+    if not rtdose_path:
+        raise FileNotFoundError(f"No reference TPS RTDose found for plan {plan_id}")
+
+    tps_grid = load_rtdose(rtdose_path)
+    sct_mc_grid = DoseGrid.load(sct.dose_path)
+    sct_resampled = _resample_to(sct_mc_grid, tps_grid)
+
+    ref_grid, ref_name = resolve_comparison_reference_dose(
+        plan_id=plan_id,
+        fraction_number=fraction_number,
+        reference=reference,
+        target_grid=tps_grid,
+        db=db,
+    )
+
+    # 3D Gamma 3%/3mm
+    gamma_map_33, pass_rate_33 = gamma_3d(
+        reference=ref_grid.array,
+        evaluation=sct_resampled.array,
+        dd_percent=3.0,
+        dta_mm=3.0,
+        voxel_size_mm=tuple(tps_grid.spacing),
+        dose_threshold_percent=10.0,
+    )
+
+    # 3D Gamma 2%/2mm
+    gamma_map_22, pass_rate_22 = gamma_3d(
+        reference=ref_grid.array,
+        evaluation=sct_resampled.array,
+        dd_percent=2.0,
+        dta_mm=2.0,
+        voxel_size_mm=tuple(tps_grid.spacing),
+        dose_threshold_percent=10.0,
+    )
+
+    d_max = float(ref_grid.array.max())
+    mask_eval = ref_grid.array >= (0.10 * d_max)
+    if np.any(mask_eval) and d_max > 0:
+        diff_rel = (sct_resampled.array[mask_eval] - ref_grid.array[mask_eval]) / d_max * 100.0
+        mean_diff = float(np.mean(diff_rel))
+        max_diff = float(np.max(np.abs(diff_rel)))
+    else:
+        mean_diff = 0.0
+        max_diff = 0.0
+
+    gamma_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        str(gamma_path),
+        gamma_map=gamma_map_33.astype(np.float32),
+        gamma_2mm=gamma_map_22.astype(np.float32),
+        passing_rate=float(round(pass_rate_33, 2)),
+        passing_rate_2mm=float(round(pass_rate_22, 2)),
+        mean_dose_diff_pct=float(round(mean_diff, 2)),
+        max_dose_diff_pct=float(round(max_diff, 2)),
+        spacing=tps_grid.spacing,
+        origin=tps_grid.origin,
+        reference_name=ref_name,
+    )
+
+    return {
+        "reference": reference,
+        "reference_name": ref_name,
+        "gamma_passing_rate": round(pass_rate_33, 2),
+        "gamma_2mm_passing_rate": round(pass_rate_22, 2),
+        "gamma_passed": bool(pass_rate_33 >= 90.0),
+        "mean_dose_diff_pct": round(mean_diff, 2),
+        "max_dose_diff_pct": round(max_diff, 2),
+        "gamma_save_path": str(gamma_path),
+    }
+
+
 def _find_and_load_reg_transform(
     plan_id: int,
     fraction_number: int,
@@ -932,7 +1181,13 @@ def calculate_synthetic_ct_dvh(
     if cache_file.is_file() and not force_recompute:
         try:
             with open(cache_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+                cached_data = json.load(f)
+            first_t = (cached_data.get("targets") or [{}])[0]
+            first_dvh = first_t.get("dvh", {})
+            has_mc = find_baseline_mcsquare_dose_path(plan_id, db) is not None
+            # If baseline MC exists but cache doesn't have mcsquare_volume_pct, fall through to recompute
+            if not has_mc or "mcsquare_volume_pct" in first_dvh:
+                return cached_data
         except Exception:
             pass
 
@@ -966,6 +1221,16 @@ def calculate_synthetic_ct_dvh(
         mc_grid = _resample_to(raw_mc, tps_grid)
     elif mc_grid.shape != tps_grid.shape:
         mc_grid = _resample_to(mc_grid, tps_grid)
+
+    # Also load baseline MC dose on planning CT if available
+    ref_mc_grid = None
+    mc_base_path = find_baseline_mcsquare_dose_path(plan_id, db)
+    if mc_base_path and mc_base_path.is_file():
+        try:
+            raw_mc_base = DoseGrid.load(mc_base_path)
+            ref_mc_grid = _resample_to(raw_mc_base, tps_grid)
+        except Exception as exc:
+            logger.warning(f"Could not load baseline MC dose for DVH comparison: {exc}")
 
     target_gy = getattr(plan, "target_dose_gy", None)
     rx_dose = (
@@ -1128,6 +1393,33 @@ def calculate_synthetic_ct_dvh(
         sct_m["v95_pct"] = sct_v95
         tps_m["v95_pct"] = tps_v95
 
+        mcsquare_dvh = None
+        mcsquare_m = None
+        delta_mc_m = None
+        if ref_mc_grid is not None:
+            try:
+                mcsquare_dvh = compute_cumulative_dvh(ref_mc_grid.array, plan_mask, dose_axis)
+                mcsquare_m = extract_percentile_metrics(ref_mc_grid.array, plan_mask, target_rx)
+                mc_v95 = (
+                    round(float(np.mean(ref_mc_grid.array[plan_mask] >= 0.95 * target_rx) * 100.0), 2)
+                    if plan_mask.any()
+                    else 0.0
+                )
+                mcsquare_m["v95_pct"] = mc_v95
+                delta_mc_m = {
+                    "d98": round(sct_m["d98"] - mcsquare_m["d98"], 2),
+                    "d95": round(sct_m["d95"] - mcsquare_m["d95"], 2),
+                    "d50": round(sct_m["d50"] - mcsquare_m["d50"], 2),
+                    "d2": round(sct_m["d2"] - mcsquare_m["d2"], 2),
+                    "d_mean": round(sct_m["d_mean"] - mcsquare_m["d_mean"], 2),
+                    "d_max": round(sct_m["d_max"] - mcsquare_m["d_max"], 2),
+                    "v95_pct": round(sct_v95 - mc_v95, 2),
+                    "v100_pct": round(sct_m["v100_pct"] - mcsquare_m["v100_pct"], 2),
+                    "volume_change_pct": vol_chg,
+                }
+            except Exception as exc:
+                logger.debug(f"Could not compute MC metrics for target {roi.get('name')}: {exc}")
+
         def_vol = roi.get("deformed_volume_cc") or round(float(def_mask.sum()) * vox_vol_cc, 2)
         plan_vol = roi.get("planned_volume_cc") or round(float(plan_mask.sum()) * vox_vol_cc, 2)
         vol_chg = (
@@ -1188,13 +1480,29 @@ def calculate_synthetic_ct_dvh(
                 "planned_metrics": tps_m,
                 "deformed_metrics": sct_m,
                 "delta_metrics": delta_m,
+                "mcsquare_metrics": mcsquare_m,
+                "delta_mcsquare_metrics": delta_mc_m,
                 "dvh": {
                     "dose_bins_gy": dose_bins_gy,
                     "tps_volume_pct": tps_dvh.tolist(),
                     "sct_volume_pct": sct_dvh.tolist(),
+                    "mcsquare_volume_pct": mcsquare_dvh.tolist() if mcsquare_dvh is not None else None,
                 },
             })
         else:
+            if ref_mc_grid is not None:
+                try:
+                    mcsquare_dvh = compute_cumulative_dvh(ref_mc_grid.array, plan_mask, dose_axis)
+                    mcsquare_m = extract_percentile_metrics(ref_mc_grid.array, plan_mask, target_rx)
+                    delta_mc_m = {
+                        "d2": round(sct_m["d2"] - mcsquare_m["d2"], 2),
+                        "d_mean": round(sct_m["d_mean"] - mcsquare_m["d_mean"], 2),
+                        "d_max": round(sct_m["d_max"] - mcsquare_m["d_max"], 2),
+                        "volume_change_pct": vol_chg,
+                    }
+                except Exception as exc:
+                    logger.debug(f"Could not compute MC metrics for OAR {roi.get('name')}: {exc}")
+
             sparing_status = "PASS" if delta_m["d_mean"] <= 1.0 else ("WARNING" if delta_m["d_mean"] <= 3.0 else "ACTION")
             sparing_note = (
                 "OAR sparing preserved."
@@ -1215,10 +1523,13 @@ def calculate_synthetic_ct_dvh(
                 "planned_metrics": tps_m,
                 "deformed_metrics": sct_m,
                 "delta_metrics": delta_m,
+                "mcsquare_metrics": mcsquare_m,
+                "delta_mcsquare_metrics": delta_mc_m,
                 "dvh": {
                     "dose_bins_gy": dose_bins_gy,
                     "tps_volume_pct": tps_dvh.tolist(),
                     "sct_volume_pct": sct_dvh.tolist(),
+                    "mcsquare_volume_pct": mcsquare_dvh.tolist() if mcsquare_dvh is not None else None,
                 },
             })
 
@@ -1242,6 +1553,7 @@ def calculate_synthetic_ct_dvh(
         "overall_note": overall_note,
         "num_targets": len(targets),
         "num_oars": len(oars),
+        "available_references": get_available_comparison_references(plan_id, fraction_number, db),
         "targets": targets,
         "oars": oars,
     }
@@ -1340,7 +1652,15 @@ def calculate_synthetic_ct_dose(
             passing_rate_2mm=pass_rate_22,
             spacing=tps_grid.spacing,
             origin=tps_grid.origin,
+            reference_name="Planned TPS Dose",
         )
+
+        # Also precompute MCsquare comparison gamma if baseline MC is available
+        if find_baseline_mcsquare_dose_path(plan_id, db):
+            try:
+                ensure_comparison_gamma(plan_id, fraction_number, "mcsquare", db)
+            except Exception as exc:
+                logger.warning(f"Could not precalculate baseline MC gamma: {exc}")
 
         sct.status = "complete"
         sct.dose_path = str(mc_path)
@@ -1412,11 +1732,13 @@ def get_sct_gamma_plane(
     fraction_number: int,
     z: int,
     db: Session,
+    reference: str = "tps",
 ) -> tuple[np.ndarray, float]:
     """Returns an axial slice of the 3D gamma map aligned to CT slice z and the slice passing rate."""
-    gamma_path = _sct_dir(plan_id, fraction_number) / "output" / "gamma_sct_vs_tps.npz"
+    ensure_comparison_gamma(plan_id, fraction_number, reference, db)
+    gamma_path = _get_gamma_path(plan_id, fraction_number, reference)
     if not gamma_path.exists():
-        raise FileNotFoundError(f"Gamma map not found for plan {plan_id} fx {fraction_number}")
+        raise FileNotFoundError(f"Gamma map not found for plan {plan_id} fx {fraction_number} (reference={reference})")
 
     data = np.load(str(gamma_path))
     gmap = data["gamma_map"]
@@ -1438,8 +1760,6 @@ def get_sct_gamma_plane(
         if gmap.shape == c_shape:
             plane = gmap[z, :, :].astype(np.float32)
         else:
-            from scipy.ndimage import map_coordinates
-
             g_spacing = data["spacing"]
             g_origin = data["origin"]
             z_phys = c_origin[0] + z * c_spacing[0]
@@ -1467,6 +1787,84 @@ def get_sct_gamma_plane(
     valid = np.isfinite(plane) & (plane >= 0)
     pass_rate = float(np.sum(plane[valid] <= 1.0) / np.sum(valid) * 100.0) if np.any(valid) else 100.0
     return plane, pass_rate
+
+
+def get_sct_reference_dose_plane(
+    plan_id: int,
+    fraction_number: int,
+    z: int,
+    db: Session,
+    reference: str = "tps",
+) -> tuple[np.ndarray, float, str]:
+    """Returns an axial slice of the chosen reference dose aligned to synthetic CT slice z, global max dose, and reference name."""
+    sct = (
+        db.query(SyntheticCT)
+        .filter_by(plan_id=plan_id, fraction_number=fraction_number)
+        .first()
+    )
+    if not sct or not sct.dose_path or not Path(sct.dose_path).exists():
+        raise FileNotFoundError(f"Synthetic CT dose not calculated for plan {plan_id} fx {fraction_number}")
+
+    dose_data = np.load(sct.dose_path)
+    c_shape = dose_data["array"].shape
+    c_spacing = dose_data["spacing"]
+    c_origin = dose_data["origin"]
+
+    if z < 0 or z >= c_shape[0]:
+        raise ValueError(f"Slice index z={z} out of bounds for depth nz={c_shape[0]}")
+
+    ref_grid, ref_name = resolve_comparison_reference_dose(
+        plan_id=plan_id,
+        fraction_number=fraction_number,
+        reference=reference,
+        target_grid=None,
+        db=db,
+    )
+
+    max_dose = float(ref_grid.array.max())
+
+    if (
+        ref_grid.shape == c_shape
+        and np.allclose(ref_grid.spacing, c_spacing)
+        and np.allclose(ref_grid.origin, c_origin)
+    ):
+        plane = ref_grid.array[z, :, :].astype(np.float32)
+    else:
+        z_phys = c_origin[0] + z * c_spacing[0]
+        iz = (z_phys - ref_grid.origin[0]) / ref_grid.spacing[0]
+
+        if iz < 0 or iz > ref_grid.shape[0] - 1:
+            plane = np.zeros((c_shape[1], c_shape[2]), dtype=np.float32)
+        else:
+            iz0 = int(np.floor(iz))
+            iz1 = min(iz0 + 1, ref_grid.shape[0] - 1)
+            w1 = float(iz - iz0)
+            w0 = 1.0 - w1
+            rslice = w0 * ref_grid.array[iz0] + w1 * ref_grid.array[iz1]
+
+            iy = (c_origin[1] + np.arange(c_shape[1]) * c_spacing[1] - ref_grid.origin[1]) / ref_grid.spacing[1]
+            ix = (c_origin[2] + np.arange(c_shape[2]) * c_spacing[2] - ref_grid.origin[2]) / ref_grid.spacing[2]
+            coords_y, coords_x = np.meshgrid(iy, ix, indexing="ij")
+            plane = map_coordinates(rslice, [coords_y, coords_x], order=1, cval=0.0).astype(np.float32)
+
+    return plane, max_dose, ref_name
+
+
+def get_sct_dose_diff_plane(
+    plan_id: int,
+    fraction_number: int,
+    z: int,
+    db: Session,
+    reference: str = "tps",
+) -> tuple[np.ndarray, float, str]:
+    """Returns an axial slice of relative % dose difference ((sCT - Reference) / D_max * 100), max abs diff, and ref name."""
+    sct_plane, sct_max = get_sct_dose_plane(plan_id, fraction_number, z, db)
+    ref_plane, ref_max, ref_name = get_sct_reference_dose_plane(plan_id, fraction_number, z, db, reference=reference)
+
+    d_norm = max(sct_max, ref_max, 1.0)
+    diff_plane = ((sct_plane - ref_plane) / d_norm) * 100.0
+    max_abs_diff = float(np.max(np.abs(diff_plane)))
+    return diff_plane.astype(np.float32), max_abs_diff, ref_name
 
 
 def get_sct_image_plane(
@@ -1885,6 +2283,31 @@ def get_synthetic_ct_detail(plan_id: int, fraction_number: int, db: Session) -> 
         except Exception:
             pass
 
+    available_refs = get_available_comparison_references(plan_id, fraction_number, db)
+    comparisons = {}
+    if r.status == "complete":
+        comparisons["tps"] = {
+            "reference": "tps",
+            "reference_name": "Planned TPS Dose",
+            "gamma_passing_rate": r.gamma_passing_rate,
+            "gamma_2mm_passing_rate": r.gamma_2mm_passing_rate,
+            "gamma_passed": r.gamma_passed,
+            "mean_dose_diff_pct": r.mean_dose_diff_pct,
+            "max_dose_diff_pct": r.max_dose_diff_pct,
+        }
+        if any(ref["id"] == "mcsquare" for ref in available_refs):
+            try:
+                mc_stats = ensure_comparison_gamma(plan_id, fraction_number, "mcsquare", db)
+                comparisons["mcsquare"] = mc_stats
+            except Exception as exc:
+                logger.debug(f"Could not prepare baseline MC comparison: {exc}")
+        if any(ref["id"] == "mcsquare_prev" for ref in available_refs):
+            try:
+                prev_stats = ensure_comparison_gamma(plan_id, fraction_number, "mcsquare_prev", db)
+                comparisons["mcsquare_prev"] = prev_stats
+            except Exception as exc:
+                logger.debug(f"Could not prepare previous fraction MC comparison: {exc}")
+
     return {
         "id": r.id,
         "plan_id": r.plan_id,
@@ -1918,9 +2341,12 @@ def get_synthetic_ct_detail(plan_id: int, fraction_number: int, db: Session) -> 
         "gamma_passed": r.gamma_passed,
         "mean_dose_diff_pct": r.mean_dose_diff_pct,
         "max_dose_diff_pct": r.max_dose_diff_pct,
+        "available_references": available_refs,
+        "comparisons": comparisons,
         "setup_shift_lat_mm": r.setup_shift_lat_mm,
         "setup_shift_long_mm": r.setup_shift_long_mm,
         "setup_shift_vert_mm": r.setup_shift_vert_mm,
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "calculated_at": r.calculated_at.isoformat() if r.calculated_at else None,
     }
+

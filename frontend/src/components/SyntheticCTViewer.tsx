@@ -12,6 +12,7 @@ import {
   Play,
   RefreshCw,
   ShieldCheck,
+  Sliders,
   Sun,
   Upload,
   X,
@@ -87,9 +88,12 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
   const [includeMask, setIncludeMask] = useState<boolean>(true);
   const [selectedRoi, setSelectedRoi] = useState<string>("");
 
+  // Comparison Reference state
+  const [comparisonReference, setComparisonReference] = useState<string>("tps");
+
   // Slice viewer state
   const [sliceZ, setSliceZ] = useState<number>(0);
-  const [viewMode, setViewMode] = useState<"dose" | "ct" | "cbct" | "gamma">("ct");
+  const [viewMode, setViewMode] = useState<"dose" | "ref_dose" | "dose_diff" | "ct" | "cbct" | "gamma">("ct");
   const [doseOpacity, setDoseOpacity] = useState<number>(0.65);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [planeLoading, setPlaneLoading] = useState<boolean>(false);
@@ -146,6 +150,11 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
     try {
       const d = await getFractionSyntheticCT(planId, fx);
       setDetail(d);
+      if (d.available_references && d.available_references.length > 0) {
+        if (!d.available_references.some((r) => r.id === comparisonReference)) {
+          setComparisonReference(d.available_references[0].id);
+        }
+      }
       const totalSlices = d.num_slices > 0 ? d.num_slices : (d.cbct_num_slices || 0);
       if (totalSlices > 0 && sliceZ >= totalSlices) {
         setSliceZ(Math.floor(totalSlices / 2));
@@ -246,11 +255,41 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
           }
         }
 
+        if (viewMode === "ref_dose") {
+          try {
+            const rRes = await fetch(
+              `/api/plans/${planId}/synthetic-ct/${selectedFraction}/ref-dose/plane/${sliceZ}?reference=${encodeURIComponent(comparisonReference)}`
+            );
+            if (rRes.ok) {
+              maxDose = parseFloat(rRes.headers.get("X-Max-Dose") || "1.0") || 1.0;
+              const rBuf = await rRes.arrayBuffer();
+              doseArray = new Float32Array(rBuf);
+            }
+          } catch (e) {
+            // ref dose optional
+          }
+        }
+
+        let diffArray: Float32Array | null = null;
+        if (viewMode === "dose_diff") {
+          try {
+            const diffRes = await fetch(
+              `/api/plans/${planId}/synthetic-ct/${selectedFraction}/dose-diff/plane/${sliceZ}?reference=${encodeURIComponent(comparisonReference)}`
+            );
+            if (diffRes.ok) {
+              const diffBuf = await diffRes.arrayBuffer();
+              diffArray = new Float32Array(diffBuf);
+            }
+          } catch (e) {
+            // diff optional
+          }
+        }
+
         let gammaArray: Float32Array | null = null;
         if (viewMode === "gamma" && detail.status === "complete") {
           try {
             const gRes = await fetch(
-              `/api/plans/${planId}/synthetic-ct/${selectedFraction}/gamma/plane/${sliceZ}`
+              `/api/plans/${planId}/synthetic-ct/${selectedFraction}/gamma/plane/${sliceZ}?reference=${encodeURIComponent(comparisonReference)}`
             );
             if (gRes.ok) {
               const gBuf = await gRes.arrayBuffer();
@@ -346,8 +385,8 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
           let g = val;
           let b = val;
 
-          // Overlay Dose
-          if (viewMode === "dose" && doseArray) {
+          // Overlay Dose (Adaptive Dose or Reference Dose)
+          if ((viewMode === "dose" || viewMode === "ref_dose") && doseArray) {
             const dVal = doseArray[i];
             const normDose = Math.max(0, Math.min(1, dVal / (maxDose || 1)));
             if (normDose > 0.05) {
@@ -371,6 +410,33 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
               }
 
               const alpha = doseOpacity;
+              r = Math.round(r * (1 - alpha) + dr * alpha);
+              g = Math.round(g * (1 - alpha) + dg * alpha);
+              b = Math.round(b * (1 - alpha) + db * alpha);
+            }
+          }
+
+          // Overlay Dose Difference (% relative difference: (sCT - Ref) / MaxDose * 100%)
+          if (viewMode === "dose_diff" && diffArray) {
+            const diffVal = diffArray[i];
+            if (Math.abs(diffVal) > 1.0) {
+              const alpha = doseOpacity;
+              // Scale from -15% to +15%
+              const clamped = Math.max(-15, Math.min(15, diffVal));
+              let dr = 0, dg = 0, db = 0;
+              if (clamped > 0) {
+                // Hotter (sCT > Ref): yellow (255, 220, 0) to intense red (235, 20, 20)
+                const t = clamped / 15;
+                dr = 255;
+                dg = Math.round(220 * (1 - t * 0.85));
+                db = Math.round(20 * (1 - t));
+              } else {
+                // Cooler (sCT < Ref): cyan (0, 220, 255) to intense deep blue (20, 40, 240)
+                const t = -clamped / 15;
+                dr = Math.round(20 * (1 - t));
+                dg = Math.round(220 * (1 - t * 0.85));
+                db = 255;
+              }
               r = Math.round(r * (1 - alpha) + dr * alpha);
               g = Math.round(g * (1 - alpha) + dg * alpha);
               b = Math.round(b * (1 - alpha) + db * alpha);
@@ -422,7 +488,7 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
     return () => {
       isSubscribed = false;
     };
-  }, [planId, selectedFraction, sliceZ, viewMode, doseOpacity, windowWidth, windowCenter, showContour, detail]);
+  }, [planId, selectedFraction, sliceZ, viewMode, doseOpacity, windowWidth, windowCenter, showContour, detail, comparisonReference]);
 
   const handleUploadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -688,77 +754,139 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
       </div>
 
       {/* Selected Fraction Details & 3D Viewer */}
-      {detail && (
-        <div className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left Column: Adaptive QA Metrics & Actions */}
-          <div className="space-y-4">
-            {/* KPI Card */}
-            <div className="bg-clinical-surface border border-clinical-border rounded-xl p-5 space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-clinical-muted">
-                  Adaptive QA · Fraction {detail.fraction_number}
-                </span>
-                <span
-                  className={`px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wide border ${
-                    detail.gamma_passed
-                      ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+      {detail && (() => {
+        const availableRefs = detail.available_references || [
+          { id: "tps", name: "Planned TPS Dose", short_name: "Plan", description: "Nominal planned RTDose from planning system" }
+        ];
+        const activeComparison = detail.comparisons?.[comparisonReference] || {
+          reference: comparisonReference,
+          reference_name: comparisonReference === "tps" ? "Planned TPS" : "Baseline MCsquare",
+          gamma_passing_rate: detail.gamma_passing_rate,
+          gamma_passed: detail.gamma_passed,
+          gamma_2mm_passing_rate: detail.gamma_2mm_passing_rate,
+          mean_dose_diff_pct: detail.mean_dose_diff_pct,
+          max_dose_diff_pct: detail.max_dose_diff_pct,
+        };
+        const isPass = activeComparison.gamma_passed ?? detail.gamma_passed;
+        const passingRate = activeComparison.gamma_passing_rate ?? detail.gamma_passing_rate;
+        const gamma2mmRate = activeComparison.gamma_2mm_passing_rate ?? detail.gamma_2mm_passing_rate;
+        const meanDoseDiff = activeComparison.mean_dose_diff_pct ?? detail.mean_dose_diff_pct;
+
+        return (
+          <div className="space-y-6">
+            {/* Comparison Reference Banner */}
+            <div className="bg-clinical-surface border border-clinical-border rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-blue-500/10 text-blue-400 shrink-0">
+                  <Sliders size={18} />
+                </div>
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-clinical-text flex items-center gap-2 flex-wrap">
+                    Comparison Reference
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-400 font-semibold border border-blue-500/30">
+                      Active: {availableRefs.find((r) => r.id === comparisonReference)?.name || comparisonReference.toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-clinical-muted mt-0.5">
+                    Compare daily sCT openMCsquare dose against nominal TPS plan or baseline/prior openMCsquare simulation.
+                  </div>
+                </div>
+              </div>
+
+              {/* Segmented Reference Selector */}
+              <div className="flex items-center gap-1.5 bg-clinical-card p-1 rounded-lg border border-clinical-border shrink-0">
+                {availableRefs.map((ref) => {
+                  const isSelected = comparisonReference === ref.id;
+                  return (
+                    <button
+                      key={ref.id}
+                      onClick={() => setComparisonReference(ref.id)}
+                      className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all flex items-center gap-1.5 ${
+                        isSelected
+                          ? "bg-blue-600 text-white shadow-xs"
+                          : "text-clinical-muted hover:text-clinical-text hover:bg-clinical-surface"
+                      }`}
+                      title={ref.description}
+                    >
+                      {ref.id === "tps" ? "🎯 " : ref.id === "mcsquare_prev" ? "⏮️ " : "⚡ "}
+                      {ref.name || ref.short_name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Left Column: Adaptive QA Metrics & Actions */}
+            <div className="space-y-4">
+              {/* KPI Card */}
+              <div className="bg-clinical-surface border border-clinical-border rounded-xl p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase tracking-wider text-clinical-muted">
+                    Adaptive QA · Fraction {detail.fraction_number}
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wide border ${
+                      isPass
+                        ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                        : detail.status === "contour_check"
+                        ? "bg-amber-500/10 text-amber-400 border-amber-500/30"
+                        : detail.status === "complete"
+                        ? "bg-red-500/10 text-red-400 border-red-500/30"
+                        : "bg-blue-500/10 text-blue-400 border-blue-500/30"
+                    }`}
+                  >
+                    {isPass
+                      ? "PASS (3%/3mm)"
                       : detail.status === "contour_check"
-                      ? "bg-amber-500/10 text-amber-400 border-amber-500/30"
+                      ? "CONTOUR CHECK REQUIRED"
                       : detail.status === "complete"
-                      ? "bg-red-500/10 text-red-400 border-red-500/30"
-                      : "bg-blue-500/10 text-blue-400 border-blue-500/30"
-                  }`}
-                >
-                  {detail.gamma_passed
-                    ? "PASS (3%/3mm)"
-                    : detail.status === "contour_check"
-                    ? "CONTOUR CHECK REQUIRED"
-                    : detail.status === "complete"
-                    ? "ACTION REQUIRED"
-                    : detail.status.replace("_", " ")}
-                </span>
-              </div>
-
-              {/* Gamma score readout */}
-              <div className="flex items-baseline gap-3">
-                <div
-                  className={`text-4xl font-extrabold ${
-                    detail.gamma_passed
-                      ? "text-emerald-400"
-                      : detail.status === "complete"
-                      ? "text-red-400"
-                      : "text-clinical-text"
-                  }`}
-                >
-                  {detail.gamma_passing_rate !== null ? `${detail.gamma_passing_rate.toFixed(1)}%` : "—"}
-                </div>
-                <div className="text-xs text-clinical-muted">
-                  passing rate
-                  <div className="text-[10px] text-clinical-muted/80">3% / 3mm DTA · &ge;90% pass</div>
-                </div>
-              </div>
-
-              {/* Secondary Metrics */}
-              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-clinical-border/60">
-                <div className="bg-clinical-card/60 p-2.5 rounded-lg border border-clinical-border/40">
-                  <span className="text-[10px] text-clinical-muted block">2% / 2mm Gamma</span>
-                  <span className="text-sm font-semibold text-clinical-text">
-                    {detail.gamma_2mm_passing_rate !== null
-                      ? `${detail.gamma_2mm_passing_rate.toFixed(1)}%`
-                      : "—"}
+                      ? "ACTION REQUIRED"
+                      : detail.status.replace("_", " ")}
                   </span>
                 </div>
 
-                <div className="bg-clinical-card/60 p-2.5 rounded-lg border border-clinical-border/40">
-                  <span className="text-[10px] text-clinical-muted block">Mean Dose &Delta;</span>
-                  <span className="text-sm font-semibold text-clinical-text">
-                    {detail.mean_dose_diff_pct !== null
-                      ? `${detail.mean_dose_diff_pct > 0 ? "+" : ""}${detail.mean_dose_diff_pct.toFixed(1)}%`
-                      : "—"}
-                  </span>
+                {/* Gamma score readout */}
+                <div className="flex items-baseline gap-3">
+                  <div
+                    className={`text-4xl font-extrabold ${
+                      isPass
+                        ? "text-emerald-400"
+                        : detail.status === "complete"
+                        ? "text-red-400"
+                        : "text-clinical-text"
+                    }`}
+                  >
+                    {passingRate !== null ? `${passingRate.toFixed(1)}%` : "—"}
+                  </div>
+                  <div className="text-xs text-clinical-muted">
+                    passing rate
+                    <div className="text-[10px] text-clinical-muted/80">
+                      3% / 3mm DTA vs {activeComparison.reference_name}
+                    </div>
+                  </div>
                 </div>
-              </div>
+
+                {/* Secondary Metrics */}
+                <div className="grid grid-cols-2 gap-2 pt-2 border-t border-clinical-border/60">
+                  <div className="bg-clinical-card/60 p-2.5 rounded-lg border border-clinical-border/40">
+                    <span className="text-[10px] text-clinical-muted block">2% / 2mm Gamma</span>
+                    <span className="text-sm font-semibold text-clinical-text">
+                      {gamma2mmRate !== null
+                        ? `${gamma2mmRate.toFixed(1)}%`
+                        : "—"}
+                    </span>
+                  </div>
+
+                  <div className="bg-clinical-card/60 p-2.5 rounded-lg border border-clinical-border/40">
+                    <span className="text-[10px] text-clinical-muted block">Mean Dose &Delta;</span>
+                    <span className="text-sm font-semibold text-clinical-text">
+                      {meanDoseDiff !== null
+                        ? `${meanDoseDiff > 0 ? "+" : ""}${meanDoseDiff.toFixed(1)}%`
+                        : "—"}
+                    </span>
+                  </div>
+                </div>
 
               {/* DIR QA Statistics */}
               {detail.mae_hu_after !== null && (
@@ -1214,7 +1342,7 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
               </div>
 
               {/* View Mode Toggle */}
-              <div className="flex items-center gap-1 bg-clinical-card p-1 rounded-lg border border-clinical-border text-xs">
+              <div className="flex items-center gap-1 bg-clinical-card p-1 rounded-lg border border-clinical-border text-xs flex-wrap">
                 <button
                   onClick={() => setViewMode("dose")}
                   className={`px-2.5 py-1 rounded font-medium transition-colors ${
@@ -1222,8 +1350,42 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
                       ? "bg-blue-600 text-white shadow-xs"
                       : "text-clinical-muted hover:text-clinical-text"
                   }`}
+                  title="Daily openMCsquare dose overlay"
                 >
-                  Dose Overlay
+                  Adaptive Dose
+                </button>
+                <button
+                  onClick={() => setViewMode("ref_dose")}
+                  className={`px-2.5 py-1 rounded font-medium transition-colors ${
+                    viewMode === "ref_dose"
+                      ? "bg-blue-600 text-white shadow-xs"
+                      : "text-clinical-muted hover:text-clinical-text"
+                  }`}
+                  title={`Reference dose plane (${comparisonReference === "tps" ? "Planned TPS" : "Baseline MC"})`}
+                >
+                  Ref Dose ({comparisonReference === "tps" ? "TPS" : "MC"})
+                </button>
+                <button
+                  onClick={() => setViewMode("dose_diff")}
+                  className={`px-2.5 py-1 rounded font-medium transition-colors ${
+                    viewMode === "dose_diff"
+                      ? "bg-blue-600 text-white shadow-xs"
+                      : "text-clinical-muted hover:text-clinical-text"
+                  }`}
+                  title="Relative dose difference % (sCT - Reference)"
+                >
+                  Dose &Delta;%
+                </button>
+                <button
+                  onClick={() => setViewMode("gamma")}
+                  className={`px-2.5 py-1 rounded font-medium transition-colors ${
+                    viewMode === "gamma"
+                      ? "bg-blue-600 text-white shadow-xs"
+                      : "text-clinical-muted hover:text-clinical-text"
+                  }`}
+                  title="3D Gamma distribution"
+                >
+                  3D Gamma
                 </button>
                 <button
                   onClick={() => setViewMode("ct")}
@@ -1247,16 +1409,6 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
                     Raw CBCT
                   </button>
                 )}
-                <button
-                  onClick={() => setViewMode("gamma")}
-                  className={`px-2.5 py-1 rounded font-medium transition-colors ${
-                    viewMode === "gamma"
-                      ? "bg-blue-600 text-white shadow-xs"
-                      : "text-clinical-muted hover:text-clinical-text"
-                  }`}
-                >
-                  3D Gamma
-                </button>
               </div>
             </div>
 
@@ -1388,7 +1540,17 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
                 <div>
                   Slice: {sliceZ + 1} / {currentTotalSlices || 1}
                 </div>
-                <div>Mode: {viewMode.toUpperCase()}</div>
+                <div>
+                  Mode: {viewMode === "dose"
+                    ? "ADAPTIVE DOSE"
+                    : viewMode === "ref_dose"
+                    ? `REF DOSE (${comparisonReference.toUpperCase()})`
+                    : viewMode === "dose_diff"
+                    ? `DOSE DIFF vs ${comparisonReference.toUpperCase()}`
+                    : viewMode === "gamma"
+                    ? `3D GAMMA vs ${comparisonReference.toUpperCase()}`
+                    : viewMode.toUpperCase()}
+                </div>
                 <div>
                   W: {windowWidth} L: {windowCenter}
                 </div>
@@ -1403,6 +1565,17 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
                   </span>
                 )}
               </div>
+
+              {viewMode === "dose_diff" && (
+                <div className="absolute bottom-3 right-3 bg-black/70 backdrop-blur-md px-2.5 py-1 rounded text-[10px] font-mono text-zinc-300 border border-white/10 flex items-center gap-2.5">
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-blue-400" /> Cooler (&lt; -1%)
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-red-500" /> Hotter (&gt; +1%)
+                  </span>
+                </div>
+              )}
 
               {viewMode === "gamma" && (
                 <div className="absolute bottom-3 right-3 bg-black/70 backdrop-blur-md px-2.5 py-1 rounded text-[10px] font-mono text-zinc-300 border border-white/10 flex items-center gap-2">
@@ -1442,9 +1615,13 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
           fractionNumber={selectedFraction}
           hasDose={detail.has_dose}
           hasDvh={detail.has_dvh}
+          activeReference={comparisonReference}
+          onReferenceChange={setComparisonReference}
+          availableReferences={detail.available_references}
         />
       </div>
-    )}
+    );
+  })()}
 
       {/* Upload CBCT Modal */}
       {showUploadModal && (
