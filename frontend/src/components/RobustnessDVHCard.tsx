@@ -5,19 +5,22 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  FileDown,
   Layers,
   Loader2,
+  Printer,
   RefreshCw,
   Sliders,
 } from "lucide-react";
 import toast from "react-hot-toast";
-import { calculatePlanDVH, getPlanDVH } from "../api/client";
+import { calculatePlanDVH, getPlanDVH, secondaryDoseReportUrl } from "../api/client";
 import type { PlanDVHResponse } from "../types";
 
 interface RobustnessDVHCardProps {
   planId: number;
   hasMCDose?: boolean;
   onLaunchMC?: () => void;
+  onSelectedRoisChange?: (selected: Set<number>) => void;
   className?: string;
 }
 
@@ -25,6 +28,7 @@ export function RobustnessDVHCard({
   planId,
   hasMCDose = true,
   onLaunchMC,
+  onSelectedRoisChange,
   className = "",
 }: RobustnessDVHCardProps) {
   const [data, setData] = useState<PlanDVHResponse | null>(null);
@@ -79,6 +83,10 @@ export function RobustnessDVHCard({
   useEffect(() => {
     loadDVH();
   }, [loadDVH]);
+
+  useEffect(() => {
+    onSelectedRoisChange?.(selectedRois);
+  }, [selectedRois, onSelectedRoisChange]);
 
   const handleRecalculate = async () => {
     try {
@@ -258,6 +266,29 @@ export function RobustnessDVHCard({
             <RefreshCw size={13} className={recalculating ? "animate-spin" : ""} />
             <span>{recalculating ? "Evaluating Scenarios…" : "Re-evaluate"}</span>
           </button>
+
+          {/* Secondary Dose Report Quick Links with Active ROI Selection */}
+          <div className="flex items-center rounded border border-clinical-border bg-clinical-surface overflow-hidden shadow-2xs">
+            <a
+              href={secondaryDoseReportUrl(planId, "html", selectedRois)}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-clinical-text hover:bg-clinical-border/30 border-r border-clinical-border transition-colors font-medium"
+              title="Open Secondary Dose Report with selected ROIs"
+            >
+              <Printer size={13} className="text-green-600 dark:text-green-400" />
+              <span>Report</span>
+            </a>
+            <a
+              href={secondaryDoseReportUrl(planId, "pdf", selectedRois)}
+              download
+              className="flex items-center gap-1 px-2 py-1.5 text-xs text-clinical-text hover:bg-clinical-border/30 transition-colors"
+              title="Download Secondary Dose PDF with selected ROIs"
+            >
+              <FileDown size={13} className="text-green-600 dark:text-green-400" />
+              <span>PDF</span>
+            </a>
+          </div>
         </div>
       </div>
 

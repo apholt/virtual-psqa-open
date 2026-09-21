@@ -261,6 +261,7 @@ export function PlanDetail() {
   const [results, setResults] = useState<GammaResult[]>([]);
   const [gate, setGate] = useState<Gate | null>(null);
   const [loading, setLoading] = useState(true);
+  const [dvhSelectedRois, setDvhSelectedRois] = useState<Set<number>>(new Set());
 
   // Gate feature muting (defaults to true / muted)
   const [muteGate, setMuteGate] = useState<boolean>(
@@ -639,7 +640,7 @@ export function PlanDetail() {
             {/* Secondary Dose Report Actions */}
             <div className="flex items-center rounded border border-clinical-border bg-clinical-surface overflow-hidden">
               <a
-                href={secondaryDoseReportUrl(id, "html")}
+                href={secondaryDoseReportUrl(id, "html", dvhSelectedRois)}
                 target="_blank"
                 rel="noreferrer"
                 className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-clinical-text hover:bg-clinical-border/30 border-r border-clinical-border transition-colors font-medium"
@@ -649,7 +650,7 @@ export function PlanDetail() {
                 Secondary Report
               </a>
               <a
-                href={secondaryDoseReportUrl(id, "pdf")}
+                href={secondaryDoseReportUrl(id, "pdf", dvhSelectedRois)}
                 download
                 className="flex items-center gap-1 px-2 py-1.5 text-xs text-clinical-text hover:bg-clinical-border/30 transition-colors"
                 title="Download Secondary Dose PDF"
@@ -1284,6 +1285,7 @@ export function PlanDetail() {
               planId={id}
               hasMCDose={doseInfo?.sources.some((s) => s.source.startsWith("mcSquare")) ?? false}
               onLaunchMC={() => handleLaunchJob("mcSquare")}
+              onSelectedRoisChange={setDvhSelectedRois}
             />
           </div>
         )}

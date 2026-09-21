@@ -298,19 +298,24 @@ def generate_synthetic_rtstruct(
 
     # Define ROIs
     rois = [
-        {"num": 1, "name": "PTV_High", "type": "PTV", "color": [220, 40, 40], "radius": 28.0, "offset": (0.0, 0.0)},
-        {"num": 2, "name": "SpinalCord", "type": "ORGAN", "color": [40, 140, 240], "radius": 8.0, "offset": (0.0, -35.0)},
-        {"num": 3, "name": "External", "type": "EXTERNAL", "color": [50, 180, 50], "radius": 75.0, "offset": (0.0, 0.0)},
+        {"num": 1, "name": "PTV_High", "type": "PTV", "color": [220, 40, 40], "radius": 20.0, "offset": (0.0, 0.0)},
+        {"num": 2, "name": "SpinalCord", "type": "ORGAN", "color": [40, 140, 240], "radius": 8.0, "offset": (0.0, -25.0)},
+        {"num": 3, "name": "External", "type": "EXTERNAL", "color": [50, 180, 50], "radius": 45.0, "offset": (0.0, 0.0)},
     ]
 
     roi_seq = []
     obs_seq = []
     contour_seq = []
 
-    # Get slice Z levels from RTDose
+    # Get slice Z levels and grid center from RTDose
     n_planes = getattr(rtdose, "NumberOfFrames", 20)
     grid_offsets = list(getattr(rtdose, "GridFrameOffsetVector", range(n_planes)))
     ipp = [float(v) for v in getattr(rtdose, "ImagePositionPatient", [0.0, 0.0, 0.0])]
+    cols = getattr(rtdose, "Columns", 50)
+    rows = getattr(rtdose, "Rows", 100)
+    spacing = getattr(rtdose, "PixelSpacing", [2.0, 2.0])
+    cx = ipp[0] + (cols * float(spacing[0])) / 2.0
+    cy = ipp[1] + (rows * float(spacing[1])) / 2.0
 
     for r in rois:
         # StructureSetROISequence item
@@ -348,8 +353,8 @@ def generate_synthetic_rtstruct(
             z_coord = ipp[2] + float(grid_offsets[z_idx])
             pts = []
             for t in theta:
-                px = ipp[0] + ox + rad * np.cos(t)
-                py = ipp[1] + oy + rad * np.sin(t)
+                px = cx + ox + rad * np.cos(t)
+                py = cy + oy + rad * np.sin(t)
                 pts.extend([round(float(px), 2), round(float(py), 2), round(float(z_coord), 2)])
 
             sl = Dataset()

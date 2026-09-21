@@ -214,8 +214,24 @@ export const getFractionalTrend = (planId: number) =>
 export const reportUrl = (planId: number, format: "html" | "pdf" = "html") =>
   format === "pdf" ? `/api/reports/${planId}?format=pdf` : `/api/reports/${planId}`;
 
-export const secondaryDoseReportUrl = (planId: number, format: "html" | "pdf" = "html") =>
-  format === "pdf" ? `/api/reports/${planId}/secondary-dose?format=pdf` : `/api/reports/${planId}/secondary-dose`;
+export const secondaryDoseReportUrl = (
+  planId: number,
+  format: "html" | "pdf" = "html",
+  rois?: number[] | Set<number> | Iterable<number>
+) => {
+  const params = new URLSearchParams();
+  if (format === "pdf") {
+    params.set("format", "pdf");
+  }
+  if (rois) {
+    const list = Array.from(rois);
+    if (list.length > 0) {
+      params.set("rois", list.join(","));
+    }
+  }
+  const qs = params.toString();
+  return `/api/reports/${planId}/secondary-dose${qs ? `?${qs}` : ""}`;
+};
 
 // Chart Checks
 export const getChartChecks = (planId: number) =>

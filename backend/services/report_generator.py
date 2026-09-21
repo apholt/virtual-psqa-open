@@ -27,7 +27,7 @@ import logging
 from datetime import datetime
 from html import escape
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Iterable, List, Optional
 
 import numpy as np
 from sqlalchemy.orm import Session
@@ -333,26 +333,18 @@ def _nice_ticks(lo: float, hi: float, n: int = 4) -> List[float]:
     return [round(lo + step * i) for i in range(n + 1)]
 
 
-def _dvh_svg(dvh_data, w: int = 760, h: int = 280) -> str:
-    """Inline SVG cumulative DVH chart with shaded robustness uncertainty envelopes."""
-    if not dvh_data or not getattr(dvh_data, "rois", None):
-        return ""
-
-    pad_l, pad_b, pad_t, pad_r = 50, 40, 20, 30
+def _render_dvh_chart_svg(
+    rois: list[Any],
+    max_dose: float,
+    rx_dose: Optional[float] = None,
+    is_target_chart: bool = False,
+    w: int = 370,
+    h: int = 230,
+) -> str:
+    """Inline SVG cumulative DVH chart for a subset of ROIs (Targets or OARs)."""
+    pad_l, pad_b, pad_t, pad_r = 44, 34, 18, 16
     plot_w = w - pad_l - pad_r
     plot_h = h - pad_t - pad_b
-
-    # Determine max dose across all ROIs
-    max_dose = 10.0
-    if getattr(dvh_data, "prescription_dose_gy", None):
-        max_dose = max(max_dose, float(dvh_data.prescription_dose_gy) * 1.15)
-    for roi in dvh_data.rois:
-        if getattr(roi, "dvh", None) and roi.dvh.dose_bins_gy:
-            max_dose = max(max_dose, float(roi.dvh.dose_bins_gy[-1]))
-        if getattr(roi, "metrics", None) and getattr(roi.metrics, "d_max", None) and roi.metrics.d_max.mc_max:
-            max_dose = max(max_dose, float(roi.metrics.d_max.mc_max) * 1.05)
-
-    max_dose = max(10.0, float(max_dose))
 
     def px(d: float) -> float:
         return pad_l + plot_w * min(1.0, max(0.0, d / max_dose))
@@ -368,49 +360,50 @@ def _dvh_svg(dvh_data, w: int = 760, h: int = 280) -> str:
         yp = py(yv)
         grid_lines.append(
             f'<line x1="{pad_l}" y1="{yp:.1f}" x2="{w - pad_r}" y2="{yp:.1f}" stroke="#21262d" stroke-width="1"/>'
-            f'<text x="{pad_l - 8}" y="{yp + 4:.1f}" font-size="10" text-anchor="end" fill="#7d8590">{yv}%</text>'
+            f'<text x="{pad_l - 6}" y="{yp + 3.5:.1f}" font-size="9" text-anchor="end" fill="#7d8590">{yv}%</text>'
         )
 
     # X: nice steps
-    x_step = 10.0 if max_dose >= 50 else (5.0 if max_dose >= 20 else 2.0)
+    x_step = 10.0 if max_dose >= 40 else (5.0 if max_dose >= 15 else 2.0)
     xv = 0.0
     while xv <= max_dose + 0.01:
         xp = px(xv)
         grid_lines.append(
             f'<line x1="{xp:.1f}" y1="{pad_t}" x2="{xp:.1f}" y2="{h - pad_b}" stroke="#21262d" stroke-width="1"/>'
-            f'<text x="{xp:.1f}" y="{h - pad_b + 16}" font-size="10" text-anchor="middle" fill="#7d8590">{xv:.0f}</text>'
+            f'<text x="{xp:.1f}" y="{h - pad_b + 14}" font-size="9" text-anchor="middle" fill="#7d8590">{xv:.0f}</text>'
         )
         xv += x_step
 
     axis_labels = (
-        f'<text x="{pad_l + plot_w / 2:.1f}" y="{h - 6}" font-size="11" text-anchor="middle" fill="#8b949e">Dose (Gy)</text>'
-        f'<text x="14" y="{pad_t + plot_h / 2:.1f}" font-size="11" text-anchor="middle" fill="#8b949e" transform="rotate(-90 14 {pad_t + plot_h / 2:.1f})">Volume (%)</text>'
+        f'<text x="{pad_l + plot_w / 2:.1f}" y="{h - 4}" font-size="10" text-anchor="middle" fill="#8b949e">Dose (Gy)</text>'
+        f'<text x="12" y="{pad_t + plot_h / 2:.1f}" font-size="10" text-anchor="middle" fill="#8b949e" transform="rotate(-90 12 {pad_t + plot_h / 2:.1f})">Volume (%)</text>'
     )
 
     rx_line = ""
-    rx = getattr(dvh_data, "prescription_dose_gy", None)
-    if rx and rx <= max_dose:
-        rx_x = px(rx)
+    if is_target_chart and rx_dose and rx_dose <= max_dose:
+        rx_x = px(rx_dose)
+        rx_text_x = min(rx_x + 3, w - pad_r - 48)
         rx_line = (
             f'<line x1="{rx_x:.1f}" y1="{pad_t}" x2="{rx_x:.1f}" y2="{h - pad_b}" '
             f'stroke="#f85149" stroke-width="1.5" stroke-dasharray="4 3"/>'
-            f'<text x="{rx_x + 4:.1f}" y="{pad_t + 12}" font-size="10" fill="#f85149" font-weight="600">Rx: {rx:.1f} Gy</text>'
+            f'<text x="{rx_text_x:.1f}" y="{pad_t + 11}" font-size="9" fill="#f85149" font-weight="700">Rx: {rx_dose:.1f} Gy</text>'
         )
 
     paths = []
-    for roi in dvh_data.rois:
+    for roi in rois:
         dvh = getattr(roi, "dvh", None)
-        if not dvh or not dvh.dose_bins_gy:
+        if not dvh or not getattr(dvh, "dose_bins_gy", None):
             continue
         bins = dvh.dose_bins_gy
         color = getattr(roi, "color", None) or "#58a6ff"
 
         # 1. Shaded Uncertainty Band
-        if dvh.mc_min_volume_pct and dvh.mc_max_volume_pct:
+        if getattr(dvh, "mc_min_volume_pct", None) and getattr(dvh, "mc_max_volume_pct", None):
             min_pts = [f"{px(b):.1f},{py(v):.1f}" for b, v in zip(bins, dvh.mc_min_volume_pct)]
             max_pts = [f"{px(b):.1f},{py(v):.1f}" for b, v in reversed(list(zip(bins, dvh.mc_max_volume_pct)))]
-            band_d = f"M {min_pts[0]} " + " ".join(f"L {pt}" for pt in min_pts[1:]) + " " + " ".join(f"L {pt}" for pt in max_pts) + " Z"
-            paths.append(f'<path d="{band_d}" fill="{color}" fill-opacity="0.22" stroke="none"/>')
+            if min_pts and max_pts:
+                band_d = f"M {min_pts[0]} " + " ".join(f"L {pt}" for pt in min_pts[1:]) + " " + " ".join(f"L {pt}" for pt in max_pts) + " Z"
+                paths.append(f'<path d="{band_d}" fill="{color}" fill-opacity="0.22" stroke="none"/>')
 
         # 2. TPS curve (dashed)
         if getattr(dvh, "tps_volume_pct", None):
@@ -418,44 +411,198 @@ def _dvh_svg(dvh_data, w: int = 760, h: int = 280) -> str:
             paths.append(f'<polyline points="{tps_pts}" fill="none" stroke="{color}" stroke-width="1.5" stroke-dasharray="4 3" stroke-opacity="0.75"/>')
 
         # 3. MC Nominal curve (solid)
-        if dvh.mc_nominal_volume_pct:
+        if getattr(dvh, "mc_nominal_volume_pct", None):
             nom_pts = " ".join(f"{px(b):.1f},{py(v):.1f}" for b, v in zip(bins, dvh.mc_nominal_volume_pct))
             paths.append(f'<polyline points="{nom_pts}" fill="none" stroke="{color}" stroke-width="2.2" stroke-linecap="round"/>')
 
+    return (
+        f'<svg class="dvh-chart" width="{w}" height="{h}" viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">\n'
+        f"  {''.join(grid_lines)}\n"
+        f"  {rx_line}\n"
+        f"  {''.join(paths)}\n"
+        f"  {axis_labels}\n"
+        f"</svg>"
+    )
+
+
+def _render_dvh_panel(
+    rois: list[Any],
+    title: str,
+    max_dose: float,
+    rx_dose: Optional[float] = None,
+    is_target: bool = False,
+    w: int = 370,
+    h: int = 230,
+) -> str:
+    """Render a dedicated DVH panel (Chart + Header + ROI Legend tags)."""
+    chart_svg = _render_dvh_chart_svg(
+        rois=rois,
+        max_dose=max_dose,
+        rx_dose=rx_dose,
+        is_target_chart=is_target,
+        w=w,
+        h=h,
+    )
     legend_items = []
-    for roi in dvh_data.rois[:8]:
+    for roi in rois:
         color = getattr(roi, "color", None) or "#58a6ff"
+        type_str = getattr(roi, "type", "")
+        type_badge = f' <span class="dvh-roi-type">[{escape(type_str)}]</span>' if type_str and not is_target else ""
         legend_items.append(
-            f'<span style="display:inline-flex;align-items:center;margin-right:12px;margin-bottom:4px;">'
-            f'<span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:{color};margin-right:4px;"></span>'
-            f'{escape(roi.name)}'
+            f'<span class="dvh-roi-tag">'
+            f'<span class="dvh-roi-dot" style="background:{color};"></span>'
+            f'<b>{escape(roi.name)}</b>{type_badge}'
             f'</span>'
         )
 
+    rx_badge = f'<span class="rx-pill">Rx: {rx_dose:.1f} Gy</span>' if (is_target and rx_dose) else ""
+
     return f"""
-    <div class="dvh-container">
-      <svg class="dvh-chart" width="{w}" height="{h}" viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">
-        {''.join(grid_lines)}
-        {rx_line}
-        {''.join(paths)}
-        {axis_labels}
-      </svg>
-      <div class="dvh-legend">
-        <div>{''.join(legend_items)}</div>
-        <div style="font-size:10px;">
-          <span style="border-bottom:2px solid #58a6ff;padding-bottom:1px;margin-right:8px;">&mdash; openMCsquare (Nominal)</span>
-          <span style="border-bottom:2px dashed #8b949e;padding-bottom:1px;margin-right:8px;">- - TPS Reference</span>
-          <span style="background:rgba(88,166,255,0.22);padding:1px 4px;border-radius:2px;">Shaded: Scenario Bounds</span>
-        </div>
+    <div class="dvh-plot-panel">
+      <div class="dvh-plot-header">
+        <span class="dvh-plot-title">{escape(title)} ({len(rois)} Selected)</span>
+        {rx_badge}
+      </div>
+      {chart_svg}
+      <div class="dvh-legend-rois">
+        {''.join(legend_items)}
       </div>
     </div>
     """
 
 
-def _render_dvh_table_html(dvh_data) -> str:
-    """Render HTML table of clinical dosimetric metrics and worst-case robustness intervals."""
+def _dvh_svg(
+    dvh_data,
+    w: int = 760,
+    h: int = 280,
+    selected_rois: Optional[Iterable[int]] = None,
+) -> str:
+    """
+    Render separate DVH plots for Targets and OARs based on active ROI selection,
+    with uncertainty envelopes, nominal MC curves, and TPS reference curves.
+    """
     if not dvh_data or not getattr(dvh_data, "rois", None):
         return ""
+
+    all_rois = list(dvh_data.rois)
+
+    # 1. Determine which ROIs are selected for plotting
+    if selected_rois is not None:
+        try:
+            sel_set = {int(x) for x in selected_rois}
+        except Exception:
+            sel_set = set()
+        chosen = [r for r in all_rois if r.roi_number in sel_set]
+        if not chosen:
+            chosen = all_rois
+    else:
+        # Default selection: Targets + top 4 significant OARs (avoiding external/couch)
+        targets = [
+            r for r in all_rois
+            if getattr(r, "is_target", False) or getattr(r, "type", "").upper() == "TARGET"
+        ]
+        oars = [
+            r for r in all_rois
+            if not getattr(r, "is_target", False)
+            and getattr(r, "type", "").upper() not in ("TARGET", "EXTERNAL", "SUPPORT")
+            and "body" not in r.name.lower()
+            and "couch" not in r.name.lower()
+            and "external" not in r.name.lower()
+            and "skin" not in r.name.lower()
+        ]
+        if not oars:
+            oars = [
+                r for r in all_rois
+                if not getattr(r, "is_target", False) and getattr(r, "type", "").upper() != "TARGET"
+            ]
+        chosen = targets + oars[:4]
+        if not chosen:
+            chosen = all_rois[:6]
+
+    # 2. Partition into Targets and OARs
+    target_rois = [
+        r for r in chosen
+        if getattr(r, "is_target", False) or getattr(r, "type", "").upper() == "TARGET"
+    ]
+    oar_rois = [r for r in chosen if r not in target_rois]
+
+    # 3. Determine max dose across all ROIs so both plots share an identical dose axis
+    max_dose = 10.0
+    rx_dose = getattr(dvh_data, "prescription_dose_gy", None)
+    if rx_dose:
+        max_dose = max(max_dose, float(rx_dose) * 1.15)
+    for roi in all_rois:
+        if getattr(roi, "dvh", None) and getattr(roi.dvh, "dose_bins_gy", None):
+            max_dose = max(max_dose, float(roi.dvh.dose_bins_gy[-1]))
+        if getattr(roi, "metrics", None) and getattr(roi.metrics, "d_max", None) and roi.metrics.d_max.mc_max:
+            max_dose = max(max_dose, float(roi.metrics.d_max.mc_max) * 1.05)
+    max_dose = max(10.0, float(max_dose))
+
+    # 4. Render panels
+    both = bool(target_rois and oar_rois)
+    pw = 370 if both else 760
+    ph = 230 if both else 260
+
+    panels: list[str] = []
+    if target_rois:
+        panels.append(
+            _render_dvh_panel(
+                rois=target_rois,
+                title="Target Structures",
+                max_dose=max_dose,
+                rx_dose=rx_dose,
+                is_target=True,
+                w=pw,
+                h=ph,
+            )
+        )
+    if oar_rois:
+        panels.append(
+            _render_dvh_panel(
+                rois=oar_rois,
+                title="Organs at Risk (OARs)",
+                max_dose=max_dose,
+                rx_dose=rx_dose,
+                is_target=False,
+                w=pw,
+                h=ph,
+            )
+        )
+
+    grid_class = "dvh-plots-grid" if both else "dvh-plots-grid single-panel"
+
+    style_legend = """
+    <div class="dvh-styles-legend">
+      <span style="font-weight:600;color:#c9d1d9;margin-right:2px;">Legend:</span>
+      <span style="display:inline-flex;align-items:center;gap:4px;">
+        <span style="display:inline-block;width:18px;height:2.2px;background:#58a6ff;border-radius:1px;"></span>
+        <span>openMCsquare Nominal</span>
+      </span>
+      <span style="display:inline-flex;align-items:center;gap:4px;">
+        <span style="display:inline-block;width:18px;border-bottom:2px dashed #8b949e;"></span>
+        <span>TPS Reference</span>
+      </span>
+      <span style="display:inline-flex;align-items:center;gap:4px;">
+        <span style="display:inline-block;width:14px;height:9px;background:rgba(88,166,255,0.25);border-radius:2px;"></span>
+        <span>Robustness Scenarios (Min &ndash; Max Bounds)</span>
+      </span>
+    </div>
+    """
+
+    return f"""
+    <div class="{grid_class}">
+      {''.join(panels)}
+    </div>
+    {style_legend}
+    """
+
+
+def _render_dvh_table_html(dvh_data, plotted_rois: Optional[Iterable[int]] = None) -> str:
+    """Render HTML table of clinical dosimetric metrics and worst-case robustness intervals for ALL ROIs."""
+    if not dvh_data or not getattr(dvh_data, "rois", None):
+        return ""
+
+    plotted_set = {int(x) for x in plotted_rois} if plotted_rois is not None else None
 
     rows = []
     for roi in dvh_data.rois:
@@ -465,6 +612,10 @@ def _render_dvh_table_html(dvh_data) -> str:
         type_str = getattr(roi, "type", "OAR")
         badge_col = "#f85149" if is_target else "#58a6ff"
         type_badge = f'<span class="badge-mini" style="background:{badge_col}22;color:{badge_col};">{escape(type_str)}</span>'
+
+        is_plotted_badge = ""
+        if plotted_set is not None and roi.roi_number in plotted_set:
+            is_plotted_badge = ' <span class="badge-mini" style="background:#388bfd22;color:#58a6ff;font-size:9px;margin-left:4px;">Plotted</span>'
 
         tps_d95 = f"{m.d95.tps:.1f} Gy" if (m.d95 and m.d95.tps is not None) else "&mdash;"
         mc_d95 = f"<b>{m.d95.mc_nominal:.1f} Gy</b> <span class='muted' style='font-size:10px;'>[{m.d95.mc_min:.1f} &ndash; {m.d95.mc_max:.1f}]</span>"
@@ -480,7 +631,7 @@ def _render_dvh_table_html(dvh_data) -> str:
 
         rows.append(
             f'<tr>'
-            f'<td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{color};margin-right:6px;"></span><b>{escape(roi.name)}</b></td>'
+            f'<td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{color};margin-right:6px;"></span><b>{escape(roi.name)}</b>{is_plotted_badge}</td>'
             f'<td>{type_badge}</td>'
             f'<td class="num">{roi.volume_cc:.1f}</td>'
             f'<td class="num">{tps_d95}</td>'
@@ -861,7 +1012,11 @@ def render_pdf(html: str) -> Optional[bytes]:
 
 
 
-def build_secondary_dose_report_html(plan_id: int, db: Session) -> str:
+def build_secondary_dose_report_html(
+    plan_id: int,
+    db: Session,
+    selected_rois: Optional[Iterable[int]] = None,
+) -> str:
     """
     Dedicated clinical report for secondary dose calculations (MCsquare vs TPS)
     and 3D gamma analysis (TG-218 compliant).
@@ -1176,8 +1331,8 @@ def build_secondary_dose_report_html(plan_id: int, db: Session) -> str:
             f'Cumulative DVH curves and worst-case scenario envelopes across <b>{dvh_data.num_scenarios} clinical scenarios</b> '
             f'(&plusmn;{dvh_data.setup_uncertainty_mm:g} mm setup uncertainty, &plusmn;{dvh_data.range_uncertainty_pct:g}% range scaling){rx_note}.'
             '</div>'
-            f'{_dvh_svg(dvh_data)}'
-            f'{_render_dvh_table_html(dvh_data)}'
+            f'{_dvh_svg(dvh_data, selected_rois=selected_rois)}'
+            f'{_render_dvh_table_html(dvh_data, plotted_rois=selected_rois)}'
             '</div>'
         )
 
@@ -1445,7 +1600,19 @@ _REPORT_CSS = """
   .sign-line .line.short { max-width: 220px; }
   .comment-box { border: 1px solid #30363d; height: 50px; border-radius: 6px; background: #0d1117; margin-top: 6px; }
   .dvh-container { text-align: center; margin-top: 10px; margin-bottom: 14px; }
-  svg.dvh-chart { max-width: 100%; height: auto; background: #0d1117; border-radius: 6px; border: 1px solid #21262d; }
+  .dvh-plots-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 10px; margin-bottom: 8px; }
+  .dvh-plots-grid.single-panel { grid-template-columns: 1fr; }
+  @media (max-width: 768px) { .dvh-plots-grid { grid-template-columns: 1fr; } }
+  .dvh-plot-panel { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; box-sizing: border-box; }
+  .dvh-plot-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; padding-bottom: 5px; border-bottom: 1px solid #21262d; }
+  .dvh-plot-title { font-size: 12px; font-weight: 700; color: #f0f6fc; letter-spacing: 0.3px; }
+  .rx-pill { font-size: 10px; font-weight: 700; color: #f85149; background: rgba(248, 81, 73, 0.15); border: 1px solid rgba(248, 81, 73, 0.35); border-radius: 4px; padding: 1px 6px; }
+  svg.dvh-chart { width: 100%; height: auto; background: #0d1117; border-radius: 6px; border: 1px solid #21262d; display: block; }
+  .dvh-legend-rois { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; font-size: 11px; color: #c9d1d9; }
+  .dvh-roi-tag { display: inline-flex; align-items: center; gap: 5px; }
+  .dvh-roi-dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex-shrink: 0; }
+  .dvh-roi-type { font-size: 9px; color: #8b949e; font-weight: normal; }
+  .dvh-styles-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; font-size: 11px; color: #8b949e; padding: 6px 12px; background: #0d1117; border: 1px solid #21262d; border-radius: 6px; margin-top: 4px; margin-bottom: 12px; }
   .dvh-legend { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; font-size: 11px; margin-top: 6px; color: #8b949e; }
   .footer { text-align: center; color: #8b949e; font-size: 11px; margin-top: 24px; border-top: 1px solid #21262d; padding-top: 12px; }
   @media print {
@@ -1466,9 +1633,18 @@ _REPORT_CSS = """
     .notice-badge { color: #0969da !important; }
     .notice-text { color: #24292f !important; }
     .sign-line .line { border-bottom-color: #000 !important; }
+    .dvh-plots-grid { grid-template-columns: 1fr 1fr !important; gap: 10px !important; }
+    .dvh-plots-grid.single-panel { grid-template-columns: 1fr !important; }
+    .dvh-plot-panel { background: #fff !important; border-color: #ddd !important; }
+    .dvh-plot-header { border-bottom-color: #eee !important; }
+    .dvh-plot-title { color: #111 !important; }
+    .rx-pill { background: #fee2e2 !important; border-color: #fca5a5 !important; color: #b91c1c !important; }
     svg.dvh-chart { background: #fff !important; border-color: #ddd !important; }
     svg.dvh-chart line { stroke: #e1e4e8 !important; }
     svg.dvh-chart text { fill: #24292f !important; }
+    .dvh-legend-rois { color: #222 !important; }
+    .dvh-roi-type { color: #555 !important; }
+    .dvh-styles-legend { background: #f8f9fa !important; border-color: #eee !important; color: #555 !important; }
     .dvh-legend { color: #555 !important; }
     .footer { color: #666 !important; border-top-color: #ddd !important; }
   }

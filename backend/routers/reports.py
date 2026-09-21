@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -51,16 +51,29 @@ def generate_report(plan_id: int, format: str = "html", db: Session = Depends(ge
 
 
 @router.get("/{plan_id}/secondary-dose")
-def generate_secondary_dose_report(plan_id: int, format: str = "html", db: Session = Depends(get_db)):
+def generate_secondary_dose_report(
+    plan_id: int,
+    format: str = "html",
+    rois: Optional[str] = Query(None, description="Comma-separated ROI numbers to plot on the DVH (e.g. 1,2,5)"),
+    db: Session = Depends(get_db),
+):
     """
     Generate dedicated clinical QA report for Secondary Dose Calculations (MCsquare vs TPS)
     and 3D Gamma Analysis. Supports HTML (for interactive view/print) and PDF download.
+    Allows plotting only selected ROIs separated into Targets and OARs, while keeping the full metrics table.
     """
     plan = db.query(Plan).filter_by(id=plan_id).first()
     if plan is None:
         raise HTTPException(status_code=404, detail="Plan not found")
 
-    html = build_secondary_dose_report_html(plan_id, db)
+    selected_roi_set = None
+    if rois:
+        try:
+            selected_roi_set = {int(x.strip()) for x in rois.split(",") if x.strip()}
+        except Exception:
+            selected_roi_set = None
+
+    html = build_secondary_dose_report_html(plan_id, db, selected_rois=selected_roi_set)
 
     if format == "pdf":
         pdf = render_pdf(html)

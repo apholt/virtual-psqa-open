@@ -19,6 +19,12 @@ from config import settings
 from services.auth_service import create_session_token
 
 
+@pytest.fixture(autouse=True)
+def enable_mc_mock_mode(monkeypatch):
+    """Enable mock simulation mode so MC simulation runs in unit tests without CT dataset."""
+    monkeypatch.setattr(settings, "MCSQUARE_SIMULATION_MODE", True)
+
+
 @pytest.fixture(scope="module")
 def client():
     token = create_session_token("admin")
@@ -150,5 +156,76 @@ def test_secondary_dose_report_deduplication(client):
     table_body = match.group(1)
     rows = re.findall(r'<tr>(.*?)</tr>', table_body, re.DOTALL)
     assert len(rows) == 2, f"Expected 2 field rows in report table, got {len(rows)}"
+
+    db.close()
+
+
+def test_secondary_dose_report_separated_dvh_plots_and_roi_selection(client):
+    """
+    Verify that:
+    1. The secondary dose report renders separate Target and OAR plots side-by-side.
+    2. Only selected ROIs are plotted when the ?rois= query parameter is specified.
+    3. The entire quantitative dosimetric metrics table remains complete with all ROIs.
+    """
+    db = SessionLocal()
+    tmp = tempfile.mkdtemp(prefix="test_dvh_separate_report_")
+    write_synthetic_dicom_set(tmp, n_fields=2, include_rtstruct=True)
+    result = ingest_dicom_directory(tmp, db)
+    plan_id = result["plan_id"]
+
+    run_stage1(plan_id, background=False)
+
+    # 1. Fetch report with default ROI selection
+    res_default = client.get(f"/api/reports/{plan_id}/secondary-dose")
+    assert res_default.status_code == 200
+    html_default = res_default.text
+
+    # Both Target and OAR plot panels should be rendered
+    assert "Target Structures" in html_default
+    assert "Organs at Risk (OARs)" in html_default
+    assert "PTV_High" in html_default
+    assert "SpinalCord" in html_default
+    # Full metrics table should contain all structures (including External)
+    assert "External" in html_default
+    assert "openMCsquare D95%" in html_default
+
+    # 2. Fetch report with ONLY the target selected (ROI 1: PTV_High)
+    res_target_only = client.get(f"/api/reports/{plan_id}/secondary-dose?rois=1")
+    assert res_target_only.status_code == 200
+    html_target = res_target_only.text
+
+    assert "Target Structures" in html_target
+    assert "PTV_High" in html_target
+    # The OAR plot panel should NOT be plotted because only Target was selected
+    assert "Organs at Risk (OARs)" not in html_target
+    # But the FULL table MUST STILL REMAIN with all structures!
+    assert "SpinalCord" in html_target  # still in table
+    assert "External" in html_target    # still in table
+
+    # 3. Fetch report with ONLY the OAR selected (ROI 2: SpinalCord)
+    res_oar_only = client.get(f"/api/reports/{plan_id}/secondary-dose?rois=2")
+    assert res_oar_only.status_code == 200
+    html_oar = res_oar_only.text
+
+    assert "Organs at Risk (OARs)" in html_oar
+    assert "SpinalCord" in html_oar
+    # Target Structures panel should not appear
+    assert "Target Structures" not in html_oar
+    # Full table remains
+    assert "PTV_High" in html_oar
+    assert "External" in html_oar
+
+    # 4. Fetch report with BOTH Target and OAR selected (ROI 1 and 2)
+    res_both = client.get(f"/api/reports/{plan_id}/secondary-dose?rois=1,2")
+    assert res_both.status_code == 200
+    html_both = res_both.text
+
+    assert "Target Structures" in html_both
+    assert "Organs at Risk (OARs)" in html_both
+    assert "dvh-plots-grid" in html_both
+    assert "PTV_High" in html_both
+    assert "SpinalCord" in html_both
+    # Full table remains
+    assert "External" in html_both
 
     db.close()
