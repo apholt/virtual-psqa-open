@@ -1,3 +1,4 @@
+import json
 import tempfile
 from starlette.testclient import TestClient
 import main
@@ -194,3 +195,141 @@ def test_fractional_qa_report_and_chart_checks():
     assert tally4["total_completed"] == 1
 
     db.close()
+
+
+def test_oir_sign_offs_and_chart_check_section_3():
+    from services.oir_service import get_chart_checks, save_chart_check
+
+    db = SessionLocal()
+    tmp = tempfile.mkdtemp(prefix="test_oir_chart_check_")
+    write_synthetic_dicom_set(tmp, n_fields=2)
+    result = ingest_dicom_directory(tmp, db)
+    plan_id = result["plan_id"]
+    plan = db.query(Plan).filter_by(id=plan_id).first()
+    plan.number_of_fractions = 10
+    db.commit()
+
+    f1 = Fraction(plan_id=plan_id, fraction_number=1, delivery_type="curative", machine="ProNova G1")
+    f2 = Fraction(plan_id=plan_id, fraction_number=2, delivery_type="curative", machine="ProNova G1")
+    db.add_all([f1, f2])
+    db.commit()
+
+    token = create_session_token("admin")
+    client = TestClient(main.app, cookies={settings.AUTH_SESSION_COOKIE: token})
+
+    # 1. Medical Physicist signs off Fx 1
+    resp_phys = client.post(
+        f"/api/oir/{plan_id}/sign-off",
+        json={
+            "fraction_number": 1,
+            "reviewer_name": "Adam Holt, MS, DABR",
+            "status": "pass",
+            "notes": "Target coverage intact, table shifts within 1.5 mm.",
+            "shifts_verified": True,
+            "contours_verified": True,
+            "reviewer_role": "physicist",
+        },
+    )
+    assert resp_phys.status_code == 200
+    phys_data = resp_phys.json()
+    assert phys_data["physics_reviewed"] is True
+    assert phys_data["physics_reviewer"] == "Adam Holt, MS, DABR"
+    assert phys_data["physician_reviewed"] is False
+
+    # 2. Check chart check report before Physician signs off
+    html_1 = build_chart_check_report_html(
+        plan_id=plan_id,
+        fraction_numbers=[1, 2],
+        db=db,
+        check_number=1,
+    )
+    # Ensure alignment shifts and adaptive dose gamma columns are removed
+    assert "Alignment Shifts (Lat / Long / Vert)" not in html_1
+    assert "Adaptive Dose Gamma" not in html_1
+    # Ensure Physics Review / Sign-Off and Physician Sign-Off columns exist
+    assert "Physics Review / Sign-Off" in html_1
+    assert "Physician Sign-Off" in html_1
+    assert "Adam Holt, MS, DABR" in html_1
+    assert "PHYSICS REVIEWED (MD PENDING)" in html_1
+    assert "PENDING PHYSICIAN" in html_1
+    assert "PENDING REVIEW" in html_1  # For Fx 2
+
+    # 3. Radiation Oncologist (Physician) signs off Fx 1
+    resp_md = client.post(
+        f"/api/oir/{plan_id}/sign-off",
+        json={
+            "fraction_number": 1,
+            "reviewer_name": "Dr. Sarah Lin, MD",
+            "status": "pass",
+            "notes": "Clinically reviewed and approved.",
+            "reviewer_role": "physician",
+        },
+    )
+    assert resp_md.status_code == 200
+    md_data = resp_md.json()
+    assert md_data["physics_reviewed"] is True
+    assert md_data["physics_reviewer"] == "Adam Holt, MS, DABR"
+    assert md_data["physician_reviewed"] is True
+    assert md_data["physician_reviewer"] == "Dr. Sarah Lin, MD"
+
+    # 4. Check chart check report after Physician signs off
+    html_2 = build_chart_check_report_html(
+        plan_id=plan_id,
+        fraction_numbers=[1, 2],
+        db=db,
+        check_number=1,
+    )
+    assert "Dr. Sarah Lin, MD" in html_2
+    assert "COMPLETE &bull; APPROVED" in html_2
+
+    # 5. Physician also signs off Fx 2
+    save_chart_check(
+        plan_id=plan_id,
+        fraction_number=2,
+        reviewer_name="Dr. Sarah Lin, MD",
+        status="pass",
+        notes="Approved Fx 2",
+        reviewer_role="physician",
+    )
+    save_chart_check(
+        plan_id=plan_id,
+        fraction_number=2,
+        reviewer_name="Adam Holt, MS, DABR",
+        status="pass",
+        notes="Physics ok",
+        reviewer_role="physicist",
+    )
+
+    # 6. Both Fx 1 and 2 are signed off by Physician -> oir_physician_approved should be verified in chart check
+    check = record_chart_check(
+        plan_id=plan_id,
+        fraction_numbers=[1, 2],
+        reviewer_name="Adam Holt, MS",
+        notes="Full check",
+        checklist=None,
+        db=db,
+    )
+    cl = json.loads(check.checklist_json)
+    oir_item = next((item for item in cl if item["key"] == "oir_physician_approved"), None)
+    assert oir_item is not None
+    assert oir_item["verified"] is True
+    assert check.oir_status == "pass"
+
+    # 7. Test backward-compatibility normalization of legacy record
+    from services.oir_service import _normalize_oir_record
+    legacy = {
+        "id": "cc_legacy",
+        "fraction_number": 3,
+        "reviewer_name": "Legacy Reviewer",
+        "status": "acceptable",
+        "notes": "Old record",
+        "timestamp": "2026-01-01T00:00:00Z",
+    }
+    normalized = _normalize_oir_record(legacy)
+    assert normalized["physics_reviewed"] is True
+    assert normalized["physics_reviewer"] == "Legacy Reviewer"
+    assert normalized["physics_status"] == "acceptable"
+    assert normalized["physician_reviewed"] is False
+
+    db.close()
+

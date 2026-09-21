@@ -33,6 +33,10 @@ class ChartCheckCreateRequest(BaseModel):
     notes: str = Field("")
     shifts_verified: bool = Field(True)
     contours_verified: bool = Field(True)
+    reviewer_role: Optional[str] = Field("physicist")  # "physicist" or "physician"
+
+
+OirSignOffCreateRequest = ChartCheckCreateRequest
 
 
 @router.get("/{plan_id}/info")
@@ -78,8 +82,9 @@ def get_oir_slice_data(
 
 
 @router.get("/{plan_id}/chart-checks")
+@router.get("/{plan_id}/sign-offs")
 def get_oir_chart_checks(plan_id: int, db: Session = Depends(get_db)):
-    """List all recorded physicist chart check reviews for this plan."""
+    """List all recorded OIR sign-offs (physicist and physician) for this plan."""
     plan = db.query(Plan).filter_by(id=plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
@@ -87,12 +92,13 @@ def get_oir_chart_checks(plan_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{plan_id}/chart-check")
+@router.post("/{plan_id}/sign-off")
 def create_chart_check(
     plan_id: int,
     payload: ChartCheckCreateRequest,
     db: Session = Depends(get_db),
 ):
-    """Record a physicist chart check review for a fraction."""
+    """Record an OIR sign-off (physicist or physician) for a fraction."""
     plan = db.query(Plan).filter_by(id=plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
@@ -105,7 +111,9 @@ def create_chart_check(
             notes=payload.notes,
             shifts_verified=payload.shifts_verified,
             contours_verified=payload.contours_verified,
+            reviewer_role=payload.reviewer_role or "physicist",
         )
     except Exception as exc:
-        logger.error(f"Failed to save chart check for plan {plan_id}: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to save chart check: {exc}")
+        logger.error(f"Failed to save OIR sign-off for plan {plan_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to save OIR sign-off: {exc}")
+

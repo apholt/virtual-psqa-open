@@ -592,7 +592,19 @@ export interface OirChartCheck {
   shifts_verified: boolean;
   contours_verified: boolean;
   timestamp: string;
+  reviewer_role?: "physicist" | "physician";
+  physics_reviewed?: boolean;
+  physics_reviewer?: string | null;
+  physics_status?: "pass" | "acceptable" | "flagged" | null;
+  physics_signed_at?: string | null;
+  physician_reviewed?: boolean;
+  physician_reviewer?: string | null;
+  physician_status?: "pass" | "acceptable" | "flagged" | null;
+  physician_signed_at?: string | null;
 }
+
+export type OirSignOff = OirChartCheck;
+
 
 export interface OirPlanInfo {
   plan_id: number;

@@ -415,9 +415,15 @@ export const saveOirChartCheck = (
     notes: string;
     shifts_verified?: boolean;
     contours_verified?: boolean;
+    reviewer_role?: "physicist" | "physician";
   }
 ) =>
   api.post<OirChartCheck>(`/oir/${planId}/chart-check`, payload).then((r) => r.data);
+
+// Aliases clarifying OIR review is a sign-off, not a chart check
+export const getOirSignOffs = getOirChartChecks;
+export const saveOirSignOff = saveOirChartCheck;
+
 
 // ---------------------------------------------------------------------------
 // Orthanc PACS / VNA Integration API

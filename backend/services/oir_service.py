@@ -8,7 +8,7 @@ Provides:
    nominal hardware geometry ("Initial Setup / Unregistered").
 4. Fast 2D slice resampling of CBCT onto the Planning CT grid using 6-DoF rigid transforms.
 5. RTSTRUCT ROI extraction and 2D contour polygon projection into image pixel space.
-6. Physicist weekly / 5-fraction chart check sign-off persistence and tracking.
+6. Offline Image Review (OIR) Physicist and Physician sign-off persistence and tracking.
 """
 from __future__ import annotations
 
@@ -695,12 +695,58 @@ def _chart_check_file(plan_id: int) -> Path:
     return results_dir / "oir_chart_checks.json"
 
 
+def _normalize_oir_record(r: dict) -> dict:
+    """Ensure both physics and physician sign-off fields are consistently populated."""
+    rec = dict(r)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    has_physics = rec.get("physics_reviewed")
+    has_physician = rec.get("physician_reviewed")
+
+    if has_physics is None and has_physician is None:
+        # Legacy record from earlier version: treat as physics sign-off
+        rec["physics_reviewed"] = True
+        rec["physics_reviewer"] = rec.get("reviewer_name") or "Medical Physicist"
+        rec["physics_status"] = rec.get("status") or "pass"
+        rec["physics_signed_at"] = rec.get("timestamp") or now_iso
+        rec["physician_reviewed"] = False
+        rec["physician_reviewer"] = None
+        rec["physician_status"] = None
+        rec["physician_signed_at"] = None
+    else:
+        rec["physics_reviewed"] = bool(rec.get("physics_reviewed", False))
+        rec["physics_reviewer"] = rec.get("physics_reviewer")
+        rec["physics_status"] = rec.get("physics_status")
+        rec["physics_signed_at"] = rec.get("physics_signed_at")
+        rec["physician_reviewed"] = bool(rec.get("physician_reviewed", False))
+        rec["physician_reviewer"] = rec.get("physician_reviewer")
+        rec["physician_status"] = rec.get("physician_status")
+        rec["physician_signed_at"] = rec.get("physician_signed_at")
+
+    # Common / legacy fallback fields
+    if not rec.get("reviewer_name"):
+        rec["reviewer_name"] = rec.get("physics_reviewer") or rec.get("physician_reviewer") or "Medical Physicist"
+    if not rec.get("status"):
+        rec["status"] = rec.get("physics_status") or rec.get("physician_status") or "pass"
+    if "notes" not in rec:
+        rec["notes"] = ""
+    if "shifts_verified" not in rec:
+        rec["shifts_verified"] = True
+    if "contours_verified" not in rec:
+        rec["contours_verified"] = True
+    if "timestamp" not in rec:
+        rec["timestamp"] = now_iso
+
+    return rec
+
+
 def get_chart_checks(plan_id: int) -> list[dict]:
-    """Load all chart check records for a plan."""
+    """Load and normalize all OIR sign-off records for a plan."""
     fpath = _chart_check_file(plan_id)
     if fpath.exists():
         try:
-            return json.loads(fpath.read_text(encoding="utf-8"))
+            raw_records = json.loads(fpath.read_text(encoding="utf-8"))
+            if isinstance(raw_records, list):
+                return [_normalize_oir_record(r) for r in raw_records]
         except Exception as exc:
             logger.warning(f"Could not read chart check records from {fpath}: {exc}")
     return []
@@ -714,31 +760,69 @@ def save_chart_check(
     notes: str,
     shifts_verified: bool = True,
     contours_verified: bool = True,
+    reviewer_role: str = "physicist",
 ) -> dict:
-    """Record a physicist chart check review for a fraction."""
+    """Record an Offline Image Review (OIR) sign-off (Physicist or Physician) for a fraction."""
     fpath = _chart_check_file(plan_id)
     records = get_chart_checks(plan_id)
+    now_iso = datetime.now(timezone.utc).isoformat()
 
-    new_record = {
-        "id": f"cc_{int(datetime.now(timezone.utc).timestamp())}",
-        "fraction_number": fraction_number,
-        "reviewer_name": reviewer_name.strip() or "Medical Physicist",
-        "status": status,  # "pass", "acceptable", "flagged"
-        "notes": notes.strip(),
-        "shifts_verified": shifts_verified,
-        "contours_verified": contours_verified,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-
-    # Upsert or prepend
     existing_idx = next(
         (i for i, r in enumerate(records) if r.get("fraction_number") == fraction_number),
         None,
     )
     if existing_idx is not None:
-        records[existing_idx] = new_record
+        target = dict(records[existing_idx])
     else:
-        records.insert(0, new_record)
+        target = {
+            "id": f"oir_{int(datetime.now(timezone.utc).timestamp())}",
+            "fraction_number": fraction_number,
+            "physics_reviewed": False,
+            "physics_reviewer": None,
+            "physics_status": None,
+            "physics_signed_at": None,
+            "physician_reviewed": False,
+            "physician_reviewer": None,
+            "physician_status": None,
+            "physician_signed_at": None,
+        }
+
+    clean_name = reviewer_name.strip()
+    is_physician = reviewer_role.lower() in ("physician", "radiation_oncologist", "radonc", "md")
+
+    if is_physician:
+        target["physician_reviewed"] = True
+        target["physician_reviewer"] = clean_name or "Radiation Oncologist"
+        target["physician_status"] = status
+        target["physician_signed_at"] = now_iso
+    else:
+        target["physics_reviewed"] = True
+        target["physics_reviewer"] = clean_name or "Medical Physicist"
+        target["physics_status"] = status
+        target["physics_signed_at"] = now_iso
+        target["shifts_verified"] = shifts_verified
+        target["contours_verified"] = contours_verified
+
+    target["reviewer_role"] = "physician" if is_physician else "physicist"
+    target["reviewer_name"] = clean_name or ("Radiation Oncologist" if is_physician else "Medical Physicist")
+    target["status"] = status
+    if notes.strip():
+        target["notes"] = notes.strip()
+    elif "notes" not in target:
+        target["notes"] = ""
+    target["timestamp"] = now_iso
+
+    normalized = _normalize_oir_record(target)
+
+    if existing_idx is not None:
+        records[existing_idx] = normalized
+    else:
+        records.insert(0, normalized)
 
     fpath.write_text(json.dumps(records, indent=2), encoding="utf-8")
-    return new_record
+    return normalized
+
+
+# Aliases reflecting that OIR sign-off is not a chart check
+get_oir_sign_offs = get_chart_checks
+save_oir_sign_off = save_chart_check

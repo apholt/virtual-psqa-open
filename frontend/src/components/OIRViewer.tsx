@@ -76,9 +76,12 @@ export const OIRViewer: React.FC<OIRViewerProps> = ({ planId }) => {
   // Hover metadata
   const [hoverPixel, setHoverPixel] = useState<{ x: number; y: number; huTpct: number; huCbct: number } | null>(null);
 
-  // Chart check sign-off panel
+  // OIR Sign-off panel (Physicist or Physician)
   const [chartChecks, setChartChecks] = useState<OirChartCheck[]>([]);
-  const [reviewerName, setReviewerName] = useState<string>(() => localStorage.getItem("psqa_oir_reviewer") || "");
+  const [reviewerRole, setReviewerRole] = useState<"physicist" | "physician">("physicist");
+  const [reviewerName, setReviewerName] = useState<string>(
+    () => localStorage.getItem("psqa_oir_physicist") || localStorage.getItem("psqa_oir_reviewer") || ""
+  );
   const [checkStatus, setCheckStatus] = useState<"pass" | "acceptable" | "flagged">("pass");
   const [checkNotes, setCheckNotes] = useState<string>("");
   const [shiftsVerified, setShiftsVerified] = useState<boolean>(true);
@@ -329,15 +332,30 @@ export const OIRViewer: React.FC<OIRViewerProps> = ({ planId }) => {
     }
   };
 
-  // Save chart check review
+  // Switch reviewer role between Medical Physicist and Radiation Oncologist (Physician)
+  const handleRoleChange = (role: "physicist" | "physician") => {
+    setReviewerRole(role);
+    if (role === "physician") {
+      setReviewerName(localStorage.getItem("psqa_oir_physician") || "");
+    } else {
+      setReviewerName(localStorage.getItem("psqa_oir_physicist") || localStorage.getItem("psqa_oir_reviewer") || "");
+    }
+  };
+
+  // Save OIR sign-off (Physicist or Physician)
   const handleSaveChartCheck = async () => {
     if (!reviewerName.trim()) {
-      toast.error("Please enter physicist reviewer name or initials.");
+      toast.error(`Please enter ${reviewerRole === "physician" ? "physician" : "physicist"} reviewer name or initials.`);
       return;
     }
     try {
       setSavingCheck(true);
-      localStorage.setItem("psqa_oir_reviewer", reviewerName.trim());
+      if (reviewerRole === "physician") {
+        localStorage.setItem("psqa_oir_physician", reviewerName.trim());
+      } else {
+        localStorage.setItem("psqa_oir_physicist", reviewerName.trim());
+        localStorage.setItem("psqa_oir_reviewer", reviewerName.trim());
+      }
       const res = await saveOirChartCheck(planId, {
         fraction_number: selectedFraction,
         reviewer_name: reviewerName,
@@ -345,14 +363,17 @@ export const OIRViewer: React.FC<OIRViewerProps> = ({ planId }) => {
         notes: checkNotes,
         shifts_verified: shiftsVerified,
         contours_verified: contoursVerified,
+        reviewer_role: reviewerRole,
       });
       setChartChecks((prev) => {
         const filtered = prev.filter((r) => r.fraction_number !== selectedFraction);
         return [res, ...filtered];
       });
-      toast.success(`Fraction ${selectedFraction} chart check sign-off recorded!`);
+      toast.success(
+        `Fraction ${selectedFraction} ${reviewerRole === "physician" ? "Physician" : "Physicist"} sign-off recorded!`
+      );
     } catch (err: any) {
-      toast.error(`Failed to save chart check: ${err?.message || "Server error"}`);
+      toast.error(`Failed to save sign-off: ${err?.message || "Server error"}`);
     } finally {
       setSavingCheck(false);
     }
@@ -403,7 +424,7 @@ export const OIRViewer: React.FC<OIRViewerProps> = ({ planId }) => {
               </span>
             </div>
             <p className="text-xs text-clinical-muted mt-0.5">
-              5-Fraction Chart Check &amp; Setup Alignment Audit &bull; {oirInfo.fractions.length} Fraction{oirInfo.fractions.length > 1 ? "s" : ""} Available
+              Offline Image Review &amp; Setup Alignment Verification &bull; {oirInfo.fractions.length} Fraction{oirInfo.fractions.length > 1 ? "s" : ""} Available
             </p>
           </div>
         </div>
@@ -839,7 +860,7 @@ export const OIRViewer: React.FC<OIRViewerProps> = ({ planId }) => {
           </div>
         </div>
 
-        {/* Right Column (4/12): RTSTRUCT ROI Contours & Physicist Chart Check */}
+        {/* Right Column (4/12): RTSTRUCT ROI Contours & OIR Sign-Off */}
         <div className="lg:col-span-4 space-y-4">
           {/* RTSTRUCT Structure Selector Box */}
           <div className="rounded-xl border border-clinical-border bg-clinical-surface p-4 space-y-3">
@@ -922,45 +943,106 @@ export const OIRViewer: React.FC<OIRViewerProps> = ({ planId }) => {
             </div>
           </div>
 
-          {/* Physicist Weekly / 5-Fraction Chart Check & Review Panel */}
+          {/* Offline Image Review (OIR) Sign-Off Panel */}
           <div className="rounded-xl border border-clinical-border bg-clinical-surface p-4 space-y-3.5 shadow-sm">
             <div className="flex items-center justify-between border-b border-clinical-border pb-2.5">
               <div className="flex items-center gap-2">
                 <ClipboardCheck size={16} className="text-clinical-accent" />
                 <h3 className="text-xs font-bold text-clinical-text uppercase tracking-wider">
-                  Physicist Chart Check Sign-Off
+                  Offline Image Review Sign-Off
                 </h3>
               </div>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300">
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300">
                 Fx {selectedFraction}
               </span>
             </div>
 
-            {/* Checklist Verification Items */}
-            <div className="space-y-2 text-xs">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={shiftsVerified}
-                  onChange={(e) => setShiftsVerified(e.target.checked)}
-                  className="rounded border-clinical-border text-clinical-accent focus:ring-clinical-accent"
-                />
-                <span className="text-clinical-text">
-                  6-DoF table shifts verified within institutional action limits (&le; 3 mm / 2&deg;)
-                </span>
+            {/* Role Toggle Selector */}
+            <div className="space-y-1 text-xs">
+              <label className="font-semibold text-clinical-muted text-[11px] block">
+                Sign-Off Clinical Role:
               </label>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => handleRoleChange("physicist")}
+                  className={`py-1.5 px-2 rounded-lg font-semibold text-xs border transition-all ${
+                    reviewerRole === "physicist"
+                      ? "bg-clinical-accent text-white border-clinical-accent shadow-xs"
+                      : "border-clinical-border text-clinical-muted hover:text-clinical-text bg-clinical-bg"
+                  }`}
+                >
+                  Medical Physicist
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRoleChange("physician")}
+                  className={`py-1.5 px-2 rounded-lg font-semibold text-xs border transition-all ${
+                    reviewerRole === "physician"
+                      ? "bg-clinical-accent text-white border-clinical-accent shadow-xs"
+                      : "border-clinical-border text-clinical-muted hover:text-clinical-text bg-clinical-bg"
+                  }`}
+                >
+                  Radiation Oncologist
+                </button>
+              </div>
+            </div>
 
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={contoursVerified}
-                  onChange={(e) => setContoursVerified(e.target.checked)}
-                  className="rounded border-clinical-border text-clinical-accent focus:ring-clinical-accent"
-                />
-                <span className="text-clinical-text">
-                  Patient anatomy &amp; critical OAR margins match Planning CT geometry
-                </span>
-              </label>
+            {/* Checklist Verification Items based on Role */}
+            <div className="space-y-2 text-xs">
+              {reviewerRole === "physicist" ? (
+                <>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={shiftsVerified}
+                      onChange={(e) => setShiftsVerified(e.target.checked)}
+                      className="rounded border-clinical-border text-clinical-accent focus:ring-clinical-accent"
+                    />
+                    <span className="text-clinical-text">
+                      6-DoF table shifts verified within institutional action limits (&le; 3 mm / 2&deg;)
+                    </span>
+                  </label>
+
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={contoursVerified}
+                      onChange={(e) => setContoursVerified(e.target.checked)}
+                      className="rounded border-clinical-border text-clinical-accent focus:ring-clinical-accent"
+                    />
+                    <span className="text-clinical-text">
+                      Patient anatomy &amp; critical OAR margins match Planning CT geometry
+                    </span>
+                  </label>
+                </>
+              ) : (
+                <>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={shiftsVerified}
+                      onChange={(e) => setShiftsVerified(e.target.checked)}
+                      className="rounded border-clinical-border text-clinical-accent focus:ring-clinical-accent"
+                    />
+                    <span className="text-clinical-text">
+                      Daily CBCT / kV alignment &amp; target coverage clinically verified by Physician
+                    </span>
+                  </label>
+
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={contoursVerified}
+                      onChange={(e) => setContoursVerified(e.target.checked)}
+                      className="rounded border-clinical-border text-clinical-accent focus:ring-clinical-accent"
+                    />
+                    <span className="text-clinical-text">
+                      Critical OAR clearance and anatomical margins approved for treatment
+                    </span>
+                  </label>
+                </>
+              )}
             </div>
 
             {/* Verdict Selection */}
@@ -1005,17 +1087,17 @@ export const OIRViewer: React.FC<OIRViewerProps> = ({ planId }) => {
               </div>
             </div>
 
-            {/* Physicist Name & Notes Input */}
+            {/* Reviewer Name & Notes Input */}
             <div className="space-y-2 text-xs">
               <div>
                 <label className="font-semibold text-clinical-muted text-[11px] block mb-1">
-                  Physicist Name / Initials:
+                  {reviewerRole === "physician" ? "Physician Name / Initials:" : "Physicist Name / Initials:"}
                 </label>
                 <input
                   type="text"
                   value={reviewerName}
                   onChange={(e) => setReviewerName(e.target.value)}
-                  placeholder="e.g. A. Holt, MS, DABR"
+                  placeholder={reviewerRole === "physician" ? "e.g. Dr. Jane Smith, MD" : "e.g. A. Holt, MS, DABR"}
                   className="w-full px-2.5 py-1.5 rounded-lg border border-clinical-border bg-clinical-bg text-clinical-text text-xs focus:outline-none focus:ring-1 focus:ring-clinical-accent"
                 />
               </div>
@@ -1028,7 +1110,11 @@ export const OIRViewer: React.FC<OIRViewerProps> = ({ planId }) => {
                   rows={2}
                   value={checkNotes}
                   onChange={(e) => setCheckNotes(e.target.value)}
-                  placeholder="e.g., Target coverage intact. Cord clearance confirmed. No anatomical change noted."
+                  placeholder={
+                    reviewerRole === "physician"
+                      ? "e.g., Daily CBCT verified. Target position acceptable for treatment."
+                      : "e.g., Target coverage intact. Cord clearance confirmed. No anatomical change noted."
+                  }
                   className="w-full px-2.5 py-1.5 rounded-lg border border-clinical-border bg-clinical-bg text-clinical-text text-xs focus:outline-none focus:ring-1 focus:ring-clinical-accent resize-none"
                 />
               </div>
@@ -1041,27 +1127,29 @@ export const OIRViewer: React.FC<OIRViewerProps> = ({ planId }) => {
               className="w-full py-2 px-3 rounded-lg bg-clinical-accent hover:bg-clinical-accent/90 text-white font-semibold text-xs flex items-center justify-center gap-1.5 shadow-sm transition-all disabled:opacity-50"
             >
               <UserCheck size={14} />
-              {savingCheck ? "Saving Sign-Off…" : `Sign Off Fraction ${selectedFraction} Chart Check`}
+              {savingCheck
+                ? "Saving Sign-Off…"
+                : `Sign Off Fraction ${selectedFraction} (${reviewerRole === "physician" ? "Physician" : "Physicist"})`}
             </button>
 
-            {/* Previous Chart Check Reviews History */}
+            {/* Previous Sign-Off Reviews History */}
             {chartChecks.length > 0 && (
               <div className="pt-2 border-t border-clinical-border space-y-2">
                 <span className="text-[11px] font-bold text-clinical-muted uppercase tracking-wider block">
                   Sign-Off Log ({chartChecks.length}):
                 </span>
-                <div className="max-h-36 overflow-y-auto space-y-1.5 text-xs">
+                <div className="max-h-52 overflow-y-auto space-y-2 text-xs">
                   {chartChecks.map((cc) => (
                     <div
                       key={cc.id}
-                      className="p-2 rounded-lg bg-clinical-bg border border-clinical-border/60 space-y-1"
+                      className="p-2.5 rounded-lg bg-clinical-bg border border-clinical-border/60 space-y-1.5"
                     >
                       <div className="flex items-center justify-between">
                         <span className="font-bold text-clinical-text">
-                          Fx {cc.fraction_number} &bull; {cc.reviewer_name}
+                          Fraction {cc.fraction_number}
                         </span>
                         <span
-                          className={`text-[10px] font-bold px-1.5 py-0.2 rounded uppercase ${
+                          className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${
                             cc.status === "pass"
                               ? "bg-green-100 dark:bg-green-950 text-green-700 dark:text-green-300"
                               : cc.status === "acceptable"
@@ -1072,13 +1160,57 @@ export const OIRViewer: React.FC<OIRViewerProps> = ({ planId }) => {
                           {cc.status}
                         </span>
                       </div>
+
+                      {/* Status indicators for Physics and Physician */}
+                      <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                        <div className="p-1.5 rounded bg-clinical-surface/80 border border-clinical-border/50">
+                          <span className="text-[10px] font-semibold text-clinical-muted block">
+                            Physics Sign-Off:
+                          </span>
+                          {cc.physics_reviewed ? (
+                            <div>
+                              <span className="font-semibold text-clinical-text block truncate" title={cc.physics_reviewer || "Medical Physicist"}>
+                                {cc.physics_reviewer || "Medical Physicist"}
+                              </span>
+                              <span className="text-[9px] text-green-600 dark:text-green-400 font-bold uppercase">
+                                Signed ({cc.physics_status || "Pass"})
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-amber-600 dark:text-amber-400 font-semibold italic">
+                              Pending Review
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="p-1.5 rounded bg-clinical-surface/80 border border-clinical-border/50">
+                          <span className="text-[10px] font-semibold text-clinical-muted block">
+                            Physician Sign-Off:
+                          </span>
+                          {cc.physician_reviewed ? (
+                            <div>
+                              <span className="font-semibold text-clinical-text block truncate" title={cc.physician_reviewer || "Radiation Oncologist"}>
+                                {cc.physician_reviewer || "Radiation Oncologist"}
+                              </span>
+                              <span className="text-[9px] text-green-600 dark:text-green-400 font-bold uppercase">
+                                Signed ({cc.physician_status || "Pass"})
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-clinical-muted font-semibold italic">
+                              Pending Review
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
                       {cc.notes && (
                         <p className="text-[11px] text-clinical-muted italic">
                           "{cc.notes}"
                         </p>
                       )}
                       <span className="text-[9px] text-clinical-muted block">
-                        {new Date(cc.timestamp).toLocaleString()}
+                        Updated: {new Date(cc.timestamp).toLocaleString()}
                       </span>
                     </div>
                   ))}

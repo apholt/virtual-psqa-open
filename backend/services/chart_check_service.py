@@ -29,6 +29,7 @@ from models.gamma_result import GammaResult
 from models.plan import Plan
 from models.synthetic_ct import SyntheticCT
 from services.fraction_log_analysis import get_plan_couch_trends
+from services.oir_service import get_chart_checks
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +223,29 @@ def record_chart_check(
             log_status = "flagged"
             break
 
-    overall_status = "pass" if (table_status == "pass" and log_status == "pass" and docs_status == "pass") else "flagged"
+    # Check Offline Image Review (OIR) sign-offs
+    oir_records = get_chart_checks(plan_id)
+    oir_by_fx = {r.get("fraction_number"): r for r in oir_records}
+    oir_status = "pass"
+    for fx in fx_sorted:
+        oir = oir_by_fx.get(fx)
+        if oir:
+            if oir.get("physics_status") == "flagged" or oir.get("physician_status") == "flagged":
+                oir_status = "flagged"
+                break
+
+    # Auto-verify physician OIR approval in checklist if all fractions have physician sign-off
+    physician_signed_all = len(fx_sorted) > 0 and all(
+        oir_by_fx.get(fx, {}).get("physician_reviewed") for fx in fx_sorted
+    )
+    if physician_signed_all:
+        for item in cl_items:
+            if item.get("key") == "oir_physician_approved" and not item.get("verified"):
+                item["verified"] = True
+        docs_all_verified = all(item.get("verified", False) for item in cl_items)
+        docs_status = "pass" if docs_all_verified else "flagged"
+
+    overall_status = "pass" if (table_status == "pass" and log_status == "pass" and oir_status == "pass" and docs_status == "pass") else "flagged"
 
     check = ChartCheck(
         plan_id=plan_id,
@@ -235,7 +258,7 @@ def record_chart_check(
         status=overall_status,
         table_status=table_status,
         log_status=log_status,
-        oir_status="pass",
+        oir_status=oir_status,
         documents_status=docs_status,
         checklist_json=json.dumps(cl_items),
         notes=notes.strip() if notes else None,
@@ -335,16 +358,30 @@ def build_chart_check_report_html(
         if gr.fraction_number is not None:
             gamma_by_fx.setdefault(gr.fraction_number, []).append(gr.passing_rate)
 
-    # 3. Gather Offline Image Review (OIR) / Synthetic CT data
+    # 3. Gather Offline Image Review (OIR) sign-offs & Synthetic CT data
+    oir_records = get_chart_checks(plan_id)
+    oir_by_fx = {r.get("fraction_number"): r for r in oir_records}
+
     sct_records = (
         db.query(SyntheticCT)
         .filter(SyntheticCT.plan_id == plan_id, SyntheticCT.fraction_number.in_(fx_sorted))
         .all()
     )
     sct_by_fx = {r.fraction_number: r for r in sct_records}
+    fx_dict = {f.fraction_number: f for f in fractions}
 
     # 4. Document checklist
-    cl_items = checklist if checklist is not None else DEFAULT_CHECKLIST
+    cl_items = [dict(item) for item in (checklist if checklist is not None else DEFAULT_CHECKLIST)]
+
+    # Auto-verify physician OIR approval in checklist if all fractions have physician sign-off
+    physician_signed_count = sum(1 for fx in fx_sorted if oir_by_fx.get(fx, {}).get("physician_reviewed"))
+    physics_signed_count = sum(1 for fx in fx_sorted if oir_by_fx.get(fx, {}).get("physics_reviewed"))
+    total_fx = len(fx_sorted)
+
+    if physician_signed_count == total_fx and total_fx > 0:
+        for item in cl_items:
+            if item.get("key") == "oir_physician_approved" and not item.get("verified"):
+                item["verified"] = True
 
     # Component evaluations
     table_pass = True
@@ -368,6 +405,20 @@ def build_chart_check_report_html(
 
     status_color = "#3fb950" if overall_pass else "#d29922"
     status_label = "CHART CHECK VERIFIED" if overall_pass else "ACTION / FLAGGED"
+
+    # OIR KPI status
+    if physics_signed_count == total_fx and physician_signed_count == total_fx and total_fx > 0:
+        oir_kpi_text = "ALL SIGNED (MD &amp; Physics)"
+        oir_kpi_color = "#3fb950"
+    elif physics_signed_count == total_fx and total_fx > 0:
+        oir_kpi_text = "PHYSICS SIGNED (MD Pending)"
+        oir_kpi_color = "#58a6ff"
+    elif physics_signed_count > 0 or physician_signed_count > 0:
+        oir_kpi_text = f"PARTIAL ({physics_signed_count}/{total_fx} Physics)"
+        oir_kpi_color = "#d29922"
+    else:
+        oir_kpi_text = "PENDING SIGN-OFF"
+        oir_kpi_color = "#d29922"
 
     parts: List[str] = []
     parts.append(_CHART_CHECK_CSS)
@@ -414,7 +465,7 @@ def build_chart_check_report_html(
         '<div style="display:flex;gap:12px;flex-wrap:wrap;">'
         f'<div class="param-box"><span class="param-lbl">6-DoF Table Positions</span><b class="param-val" style="color:{"#3fb950" if table_pass else "#d29922"}">{"PASS (&le; 3mm / 1&deg;)" if table_pass else "MARGINAL"}</b></div>'
         f'<div class="param-box"><span class="param-lbl">Delivery Logs</span><b class="param-val" style="color:{"#3fb950" if log_pass else "#f85149"}">{"PASS (Complete)" if log_pass else "INTERRUPTED / PARTIAL"}</b></div>'
-        f'<div class="param-box"><span class="param-lbl">Offline Image Review</span><b class="param-val" style="color:#3fb950">VERIFIED</b></div>'
+        f'<div class="param-box"><span class="param-lbl">Offline Image Review</span><b class="param-val" style="color:{oir_kpi_color}">{oir_kpi_text}</b></div>'
         f'<div class="param-box"><span class="param-lbl">Chart Documents</span><b class="param-val" style="color:{"#3fb950" if docs_pass else "#d29922"}">{"ALL VERIFIED" if docs_pass else "ITEMS PENDING"}</b></div>'
         '</div>'
         '</div>'
@@ -523,46 +574,97 @@ def build_chart_check_report_html(
     parts.append('</tbody></table></div>')
 
     # Section 3: Offline Image Review (OIR)
-    parts.append('<div class="card"><h2>3. Offline Image Review (OIR) &amp; Daily Alignment</h2>')
+    parts.append('<div class="card"><h2>3. Offline Image Review (OIR) &amp; Physician Sign-Off</h2>')
+    parts.append(
+        '<p class="muted" style="margin-bottom:10px;">Daily patient image alignment verification (CBCT / planar kV-kV) sign-offs by Medical Physics and Radiation Oncology (Physician).</p>'
+    )
     parts.append(
         '<table class="tbl"><thead><tr>'
-        '<th>Fraction</th><th>Imaging Modality</th><th>Scan Date</th><th>Alignment Shifts (Lat / Long / Vert)</th><th>Adaptive Dose Gamma</th><th>OIR Status</th>'
+        '<th>Fraction</th><th>Imaging Modality</th><th>Scan Date &amp; Time</th><th>Physics Review / Sign-Off</th><th>Physician Sign-Off</th><th>OIR Verification Status</th>'
         '</tr></thead><tbody>'
     )
-    has_oir = False
     for fx in fx_sorted:
         sct = sct_by_fx.get(fx)
-        if sct:
-            has_oir = True
-            s_date = sct.scan_date.strftime("%Y-%m-%d %H:%M") if sct.scan_date else "—"
-            lat = f"{sct.setup_shift_lat_mm:+.1f}" if sct.setup_shift_lat_mm is not None else "0.0"
-            lng = f"{sct.setup_shift_long_mm:+.1f}" if sct.setup_shift_long_mm is not None else "0.0"
-            vert = f"{sct.setup_shift_vert_mm:+.1f}" if sct.setup_shift_vert_mm is not None else "0.0"
-            shifts_str = f"{lat} / {lng} / {vert} mm"
-            g_rate = f"{sct.gamma_passing_rate:.1f}%" if sct.gamma_passing_rate is not None else "—"
-            oir_col = "#3fb950" if sct.gamma_passed else "#d29922"
-            parts.append(
-                f'<tr>'
-                f'<td><b>Fx {fx}</b></td>'
-                f'<td>Daily CBCT</td>'
-                f'<td>{s_date}</td>'
-                f'<td>{shifts_str}</td>'
-                f'<td style="color:{oir_col};font-weight:700;">{g_rate}</td>'
-                f'<td><span class="badge-mini" style="background:{oir_col}22;color:{oir_col};">ALIGNMENT VERIFIED</span></td>'
-                f'</tr>'
+        f_rec = fx_dict.get(fx)
+        oir = oir_by_fx.get(fx, {})
+
+        if sct and sct.scan_date:
+            modality = "Daily CBCT"
+            dt_str = sct.scan_date.strftime("%Y-%m-%d %H:%M")
+        elif f_rec and f_rec.delivery_date:
+            modality = "Daily CBCT / kV-kV"
+            dt_str = str(f_rec.delivery_date)
+        else:
+            modality = "Daily CBCT / kV-kV"
+            dt_str = "Verified in OMR"
+
+        # Physics Review / Sign-Off
+        if oir.get("physics_reviewed"):
+            p_name = escape(oir.get("physics_reviewer") or "Medical Physicist")
+            p_stat = (oir.get("physics_status") or "pass").lower()
+            p_col = "#3fb950" if p_stat == "pass" else ("#d29922" if p_stat == "acceptable" else "#f85149")
+            p_ts = oir.get("physics_signed_at") or oir.get("timestamp") or ""
+            try:
+                p_date_str = datetime.fromisoformat(p_ts.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                p_date_str = p_ts[:16] if p_ts else "Signed"
+            physics_cell = (
+                f'<div>'
+                f'<span class="badge-mini" style="background:{p_col}22;color:{p_col};font-weight:700;">REVIEWED &bull; {p_stat.upper()}</span>'
+                f'<div style="font-weight:600;font-size:11px;margin-top:3px;color:#c9d1d9;">{p_name}</div>'
+                f'<div class="muted" style="font-size:10px;">{p_date_str}</div>'
+                f'</div>'
             )
-    if not has_oir:
-        for fx in fx_sorted:
-            parts.append(
-                f'<tr>'
-                f'<td><b>Fx {fx}</b></td>'
-                f'<td>Daily CBCT / kV-kV</td>'
-                f'<td>Verified in OMR</td>'
-                f'<td>Aligned to Isocenter</td>'
-                f'<td>&ge; 95.0%</td>'
-                f'<td><span class="badge-mini" style="background:#3fb95022;color:#3fb950;">VERIFIED</span></td>'
-                f'</tr>'
+        else:
+            physics_cell = '<span class="badge-mini" style="background:#d2992222;color:#d29922;font-weight:600;">PENDING PHYSICS</span>'
+
+        # Physician Sign-Off
+        if oir.get("physician_reviewed"):
+            md_name = escape(oir.get("physician_reviewer") or "Radiation Oncologist")
+            md_stat = (oir.get("physician_status") or "pass").lower()
+            md_col = "#3fb950" if md_stat in ("pass", "approved") else ("#d29922" if md_stat == "acceptable" else "#f85149")
+            md_ts = oir.get("physician_signed_at") or ""
+            try:
+                md_date_str = datetime.fromisoformat(md_ts.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                md_date_str = md_ts[:16] if md_ts else "Signed"
+            physician_cell = (
+                f'<div>'
+                f'<span class="badge-mini" style="background:{md_col}22;color:{md_col};font-weight:700;">SIGNED &bull; {md_stat.upper()}</span>'
+                f'<div style="font-weight:600;font-size:11px;margin-top:3px;color:#c9d1d9;">{md_name}</div>'
+                f'<div class="muted" style="font-size:10px;">{md_date_str}</div>'
+                f'</div>'
             )
+        else:
+            physician_cell = '<span class="badge-mini" style="background:#8b949e22;color:#8b949e;font-weight:600;">PENDING PHYSICIAN</span>'
+
+        # Overall Fraction OIR Status
+        has_phys = bool(oir.get("physics_reviewed"))
+        has_md = bool(oir.get("physician_reviewed"))
+        phys_flagged = (oir.get("physics_status") == "flagged")
+        md_flagged = (oir.get("physician_status") == "flagged")
+
+        if phys_flagged or md_flagged:
+            overall_badge = '<span class="badge-mini" style="background:#f8514922;color:#f85149;font-weight:700;">FLAGGED</span>'
+        elif has_phys and has_md:
+            overall_badge = '<span class="badge-mini" style="background:#3fb95022;color:#3fb950;font-weight:700;">COMPLETE &bull; APPROVED</span>'
+        elif has_phys:
+            overall_badge = '<span class="badge-mini" style="background:#58a6ff22;color:#58a6ff;font-weight:700;">PHYSICS REVIEWED (MD PENDING)</span>'
+        elif has_md:
+            overall_badge = '<span class="badge-mini" style="background:#d2992222;color:#d29922;font-weight:700;">PHYSICIAN SIGNED (PHYSICS PENDING)</span>'
+        else:
+            overall_badge = '<span class="badge-mini" style="background:#d2992222;color:#d29922;font-weight:700;">PENDING REVIEW</span>'
+
+        parts.append(
+            f'<tr>'
+            f'<td><b>Fx {fx}</b></td>'
+            f'<td>{modality}</td>'
+            f'<td>{dt_str}</td>'
+            f'<td>{physics_cell}</td>'
+            f'<td>{physician_cell}</td>'
+            f'<td>{overall_badge}</td>'
+            f'</tr>'
+        )
     parts.append('</tbody></table></div>')
 
     # Section 4: Patient Chart Document Review Checklist
