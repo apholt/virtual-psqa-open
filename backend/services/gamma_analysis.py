@@ -206,7 +206,7 @@ def _external_mask(target: DoseGrid, dicom_store_path: str) -> Optional[np.ndarr
         return None
 
     dcm = pydicom.dcmread(rtstruct, force=True)
-    names = {s.ROINumber: str(s.ROIName) for s in dcm.StructureSetROISequence}
+    names = {s.ROINumber: str(s.ROIName) for s in getattr(dcm, "StructureSetROISequence", [])}
     ext_number = None
     # prefer interpreted type EXTERNAL, fall back to name match
     for obs in getattr(dcm, "RTROIObservationsSequence", []):
@@ -232,8 +232,10 @@ def _external_mask(target: DoseGrid, dicom_store_path: str) -> Optional[np.ndarr
     sz, sy, sx = (float(v) for v in target.spacing)
     oz, oy, ox = (float(v) for v in target.origin)
     mask = np.zeros((nzv, nyv, nxv), dtype=bool)
-    for dslice in rc.ContourSequence:
-        cd = dslice.ContourData
+    for dslice in getattr(rc, "ContourSequence", []):
+        cd = getattr(dslice, "ContourData", None)
+        if cd is None or len(cd) < 3:
+            continue
         xs = (np.asarray(cd[0::3], dtype=float) - ox) / sx
         ys = (np.asarray(cd[1::3], dtype=float) - oy) / sy
         zi = int(round((float(cd[2]) - oz) / sz))

@@ -21,9 +21,9 @@ class DVH:
       self.Dose_SeriesInstanceUID = dose.SeriesInstanceUID
 
     if(Contour != []):
-      self.Struct_SeriesInstanceUID = Contour.SeriesInstanceUID
-      self.ROIName = Contour.ROIName
-      self.ROIDisplayColor = Contour.ROIDisplayColor
+      self.Struct_SeriesInstanceUID = getattr(Contour, "SeriesInstanceUID", "")
+      self.ROIName = getattr(Contour, "ROIName", "")
+      self.ROIDisplayColor = getattr(Contour, "ROIDisplayColor", "")
 
     if(dose != [] and Contour != []):
       self.compute_DVH(dose, Contour, maxDVH)

@@ -191,7 +191,7 @@ def apply_density_overrides(CT, rtstruct_path: str, hu_density_file: str = None,
         return 0
 
     dcm = pydicom.dcmread(rtstruct_path, force=True)
-    roi_by_number = {s.ROINumber: str(s.ROIName) for s in dcm.StructureSetROISequence}
+    roi_by_number = {s.ROINumber: str(s.ROIName) for s in getattr(dcm, "StructureSetROISequence", [])}
     contour_by_name = {}
     for rc in getattr(dcm, "ROIContourSequence", []):
         nm = roi_by_number.get(getattr(rc, "ReferencedROINumber", None))
@@ -204,8 +204,10 @@ def apply_density_overrides(CT, rtstruct_path: str, hu_density_file: str = None,
 
     def rasterize(rc):
         mask = np.zeros((nx, ny, nz), dtype=bool)
-        for dslice in rc.ContourSequence:
-            cd = dslice.ContourData
+        for dslice in getattr(rc, "ContourSequence", []):
+            cd = getattr(dslice, "ContourData", None)
+            if cd is None or len(cd) < 3:
+                continue
             xs = (np.asarray(cd[0::3], dtype=float) - ipp[0]) / ps[0]
             ys = (np.asarray(cd[1::3], dtype=float) - ipp[1]) / ps[1]
             sid = int(round((float(cd[2]) - ipp[2]) / ps[2]))

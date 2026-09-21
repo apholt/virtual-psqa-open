@@ -189,9 +189,15 @@ def get_oir_plan_info(plan_id: int, db: Session) -> dict:
                 roi_names[int(s.ROINumber)] = str(getattr(s, "ROIName", f"ROI_{s.ROINumber}"))
 
             for o in getattr(ds, "ROIContourSequence", []):
-                num = int(o.ReferencedROINumber)
-                raw_color = getattr(o, "ROIDisplayColor", [255, 0, 0])
-                color = [int(c) for c in raw_color] if len(raw_color) == 3 else [255, 0, 0]
+                num = int(getattr(o, "ReferencedROINumber", 0))
+                raw_color = getattr(o, "ROIDisplayColor", None)
+                if raw_color is not None and len(raw_color) >= 3:
+                    try:
+                        color = [int(c) for c in raw_color[:3]]
+                    except Exception:
+                        color = [255, 0, 0]
+                else:
+                    color = [255, 0, 0]
                 contours = getattr(o, "ContourSequence", [])
                 zs = []
                 for c in contours:
@@ -473,9 +479,15 @@ def _get_parsed_rtstruct_contours(plan_id: int, plan: Plan) -> List[Tuple[float,
                      for s in getattr(ds, "StructureSetROISequence", [])}
         parsed = []
         for o in getattr(ds, "ROIContourSequence", []):
-            num = int(o.ReferencedROINumber)
-            raw_color = getattr(o, "ROIDisplayColor", [255, 0, 0])
-            color = [int(c) for c in raw_color] if len(raw_color) == 3 else [255, 0, 0]
+            num = int(getattr(o, "ReferencedROINumber", 0))
+            raw_color = getattr(o, "ROIDisplayColor", None)
+            if raw_color is not None and len(raw_color) >= 3:
+                try:
+                    color = [int(c) for c in raw_color[:3]]
+                except Exception:
+                    color = [255, 0, 0]
+            else:
+                color = [255, 0, 0]
             name = roi_names.get(num, f"ROI_{num}")
             for c in getattr(o, "ContourSequence", []):
                 data = getattr(c, "ContourData", [])

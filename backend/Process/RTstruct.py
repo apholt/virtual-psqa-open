@@ -37,20 +37,33 @@ class RTstruct:
       print("Warning: RTstruct " + self.SeriesInstanceUID + " is already loaded")
       return
       
-    dcm = pydicom.dcmread(self.DcmFile)
+    dcm = pydicom.dcmread(self.DcmFile, force=True)
     
     self.CT_SeriesInstanceUID = CT.SeriesInstanceUID
     
-    for dcm_struct in dcm.StructureSetROISequence:    
-      ReferencedROI_id = next((x for x, val in enumerate(dcm.ROIContourSequence) if val.ReferencedROINumber == dcm_struct.ROINumber), -1)
-      dcm_contour = dcm.ROIContourSequence[ReferencedROI_id]
-    
+    roi_contour_seq = getattr(dcm, "ROIContourSequence", [])
+    for dcm_struct in getattr(dcm, "StructureSetROISequence", []):    
+      roi_number = getattr(dcm_struct, "ROINumber", None)
+      ReferencedROI_id = next((x for x, val in enumerate(roi_contour_seq) if getattr(val, "ReferencedROINumber", None) == roi_number), -1)
+      if ReferencedROI_id == -1:
+        continue
+      dcm_contour = roi_contour_seq[ReferencedROI_id]
+
+      if not hasattr(dcm_contour, 'ContourSequence') or not dcm_contour.ContourSequence:
+        continue
+
       Contour = ROIcontour()
       Contour.SeriesInstanceUID = self.SeriesInstanceUID
-      Contour.ROIName = dcm_struct.ROIName
-      Contour.ROIDisplayColor = dcm_contour.ROIDisplayColor
-    
-      #print("Import contour " + str(len(self.Contours)) + ": " + Contour.ROIName)
+      Contour.ROIName = getattr(dcm_struct, "ROIName", f"ROI_{roi_number}")
+
+      raw_color = getattr(dcm_contour, "ROIDisplayColor", None)
+      if raw_color is not None and len(raw_color) >= 3:
+        try:
+          Contour.ROIDisplayColor = [int(c) for c in raw_color[:3]]
+        except Exception:
+          Contour.ROIDisplayColor = [255, 0, 0]
+      else:
+        Contour.ROIDisplayColor = [255, 0, 0]
     
       Contour.Mask = np.zeros((CT.GridSize[0], CT.GridSize[1], CT.GridSize[2]), dtype=bool)
       Contour.Mask_GridSize = CT.GridSize
@@ -60,32 +73,24 @@ class RTstruct:
       Contour.ContourMask = np.zeros((CT.GridSize[0], CT.GridSize[1], CT.GridSize[2]), dtype=bool)
       
       SOPInstanceUID_match = 1
-      
-      if not hasattr(dcm_contour, 'ContourSequence'):
-          print("This structure has no attribute ContourSequence. Skipping ...")
-          continue
 
       for dcm_slice in dcm_contour.ContourSequence:
+        cdata = getattr(dcm_slice, "ContourData", None)
+        if cdata is None or len(cdata) < 3:
+          continue
         Slice = {}
       
         # list of Dicom coordinates
-        Slice["XY_dcm"] = list(zip( np.array(dcm_slice.ContourData[0::3]), np.array(dcm_slice.ContourData[1::3]) ))
-        Slice["Z_dcm"] = float(dcm_slice.ContourData[2])
+        Slice["XY_dcm"] = list(zip( np.array(cdata[0::3]), np.array(cdata[1::3]) ))
+        Slice["Z_dcm"] = float(cdata[2])
       
         # list of coordinates in the image frame
-        Slice["XY_img"] = list(zip( ((np.array(dcm_slice.ContourData[0::3]) - CT.ImagePositionPatient[0]) / CT.PixelSpacing[0]), ((np.array(dcm_slice.ContourData[1::3]) - CT.ImagePositionPatient[1]) / CT.PixelSpacing[1]) ))
+        Slice["XY_img"] = list(zip( ((np.array(cdata[0::3]) - CT.ImagePositionPatient[0]) / CT.PixelSpacing[0]), ((np.array(cdata[1::3]) - CT.ImagePositionPatient[1]) / CT.PixelSpacing[1]) ))
         Slice["Z_img"] = (Slice["Z_dcm"] - CT.ImagePositionPatient[2]) / CT.PixelSpacing[2]
         Slice["Slice_id"] = int(round(Slice["Z_img"]))
 
         if Slice["Slice_id"] < 0 or Slice["Slice_id"] >= CT.GridSize[2]:
           continue
-      
-        # convert polygon to mask (based on matplotlib - slow)
-        #x, y = np.meshgrid(np.arange(CT.GridSize[0]), np.arange(CT.GridSize[1]))
-        #points = np.transpose((x.ravel(), y.ravel()))
-        #path = Path(Slice["XY_img"])
-        #mask = path.contains_points(points)
-        #mask = mask.reshape((CT.GridSize[0], CT.GridSize[1]))
       
         # convert polygon to mask (based on PIL - fast)
         img = Image.new('L', (CT.GridSize[0], CT.GridSize[1]), 0)
@@ -104,9 +109,11 @@ class RTstruct:
         # check if the contour sequence is imported on the correct CT slice:
         if (
           hasattr(dcm_slice, 'ContourImageSequence')
+          and dcm_slice.ContourImageSequence
           and hasattr(CT, 'SOPInstanceUIDs')
           and CT.SOPInstanceUIDs
           and Slice["Slice_id"] < len(CT.SOPInstanceUIDs)
+          and hasattr(dcm_slice.ContourImageSequence[0], 'ReferencedSOPInstanceUID')
           and CT.SOPInstanceUIDs[Slice["Slice_id"]] != dcm_slice.ContourImageSequence[0].ReferencedSOPInstanceUID
         ):
           SOPInstanceUID_match = 0
