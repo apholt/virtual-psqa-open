@@ -26,6 +26,7 @@ from services.imaging import (
 )
 from services.synthetic_ct_service import (
     calculate_synthetic_ct_dose,
+    calculate_synthetic_ct_dvh,
     generate_synthetic_ct,
     get_cbct_image_plane,
     get_sct_dose_plane,
@@ -217,13 +218,30 @@ def test_synthetic_ct_full_pipeline():
         assert gamma_plane is not None
         assert pass_r >= 0
 
-        # 7. Verify HTML report generation
+        # 7. Verify HTML report generation (including Deformed Target Coverage & DVH)
         html = build_synthetic_ct_report_html(plan_id, fraction_number=1, db=db)
         assert "SyntheticQACT Adaptive Setup &amp; Dose QA Report" in html
         assert "Adaptive Dose Verification Summary" in html
         assert "Fraction 1" in html
+        assert "Deformed Target Coverage" in html
+        assert "Adaptive DVH" in html
 
-        # 8. Test REST API endpoints
+        # 8. Verify direct DVH computation on deformed targets
+        dvh_res = calculate_synthetic_ct_dvh(plan_id, fraction_number=1, db=db)
+        assert dvh_res["plan_id"] == plan_id
+        assert dvh_res["fraction_number"] == 1
+        assert dvh_res["overall_target_coverage"] in ("PASS", "WARNING", "FAIL")
+        assert "overall_note" in dvh_res
+        assert len(dvh_res["targets"]) + len(dvh_res["oars"]) > 0
+        if dvh_res["targets"]:
+            t0 = dvh_res["targets"][0]
+            assert "d95" in t0["planned_metrics"]
+            assert "d95" in t0["deformed_metrics"]
+            assert "dvh" in t0
+            assert len(t0["dvh"]["dose_bins_gy"]) > 0
+            assert len(t0["dvh"]["sct_volume_pct"]) == len(t0["dvh"]["dose_bins_gy"])
+
+        # 9. Test REST API endpoints
         res_list = client.get(f"/api/plans/{plan_id}/synthetic-ct")
         assert res_list.status_code == 200
         summaries = res_list.json()
@@ -231,6 +249,7 @@ def test_synthetic_ct_full_pipeline():
         assert summaries[0]["fraction_number"] == 1
         assert summaries[0]["status"] == "complete"
         assert summaries[0]["has_cbct"] is True
+        assert summaries[0]["has_dvh"] is True
 
         res_detail = client.get(f"/api/plans/{plan_id}/synthetic-ct/1")
         assert res_detail.status_code == 200
@@ -238,10 +257,24 @@ def test_synthetic_ct_full_pipeline():
         assert detail["fraction_number"] == 1
         assert detail["has_dose"] is True
         assert detail["cbct_num_slices"] == 6
+        assert detail["has_dvh"] is True
+
+        # Test DVH endpoint
+        res_dvh = client.get(f"/api/plans/{plan_id}/synthetic-ct/1/dvh")
+        assert res_dvh.status_code == 200
+        dvh_api_data = res_dvh.json()
+        assert dvh_api_data["fraction_number"] == 1
+        assert dvh_api_data["overall_target_coverage"] in ("PASS", "WARNING", "FAIL")
+
+        # Test DVH recompute endpoint
+        res_dvh_recompute = client.get(f"/api/plans/{plan_id}/synthetic-ct/1/dvh?recompute=true")
+        assert res_dvh_recompute.status_code == 200
+        assert res_dvh_recompute.json()["fraction_number"] == 1
 
         res_report = client.get(f"/api/reports/{plan_id}/synthetic-ct?fraction_number=1")
         assert res_report.status_code == 200
         assert "SyntheticQACT" in res_report.text
+        assert "Deformed Target Coverage" in res_report.text
 
         res_dose_plane = client.get(f"/api/plans/{plan_id}/synthetic-ct/1/dose/plane/0")
         assert res_dose_plane.status_code == 200
@@ -257,7 +290,7 @@ def test_synthetic_ct_full_pipeline():
         assert res_gamma_plane.status_code == 200
         assert "X-Passing-Rate" in res_gamma_plane.headers
 
-        print("[SUCCESS] All SyntheticQACT and CBCT pipeline tests passed!")
+        print("[SUCCESS] All SyntheticQACT, CBCT, and Deformed DVH pipeline tests passed!")
     finally:
         db.close()
 

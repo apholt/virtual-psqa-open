@@ -12,7 +12,13 @@ from .volume_geometry import VolumeGeometry
 from .rigid_transforms import RigidTransform, make_transform, to_sitk_fixed_to_moving
 from .resampling import resample_to_reference, to_sitk, from_sitk
 from .dicom_volume_loader import load_cbct_series, find_planning_ct_series, scan_dicom_slices
-from .synthetic_ct_engine import build_virtual_ct, export_ct_series, cbct_external_mask
+from .synthetic_ct_engine import (
+    build_virtual_ct,
+    export_ct_series,
+    cbct_external_mask,
+    deform_mask,
+    propagate_rois_through_dir,
+)
 from .external_contour import (
     get_rtstruct_external_mask,
     get_rtstruct_external_rois,
@@ -38,6 +44,8 @@ __all__ = [
     "build_virtual_ct",
     "export_ct_series",
     "cbct_external_mask",
+    "deform_mask",
+    "propagate_rois_through_dir",
     "get_rtstruct_external_mask",
     "get_rtstruct_external_rois",
     "compute_robust_external_mask",

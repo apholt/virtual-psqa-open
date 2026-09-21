@@ -48,6 +48,7 @@ class SyntheticCT(Base):
     setup_shift_lat_mm: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     setup_shift_long_mm: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     setup_shift_vert_mm: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    dvh_metrics: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     calculated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 

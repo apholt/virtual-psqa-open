@@ -116,6 +116,7 @@ def ensure_schema():
                 ("dir_p99_displacement_mm", "REAL"),
                 ("mae_hu_before", "REAL"),
                 ("mae_hu_after", "REAL"),
+                ("dvh_metrics", "TEXT"),
             ]
             for col_name, col_type in sct_new_cols:
                 if col_name not in cols_sct:

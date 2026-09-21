@@ -16,6 +16,7 @@ import type {
   FractionLogSummary,
   SyntheticCTSummary,
   SyntheticCTDetail,
+  SyntheticCTDVHResponse,
   ExternalContourInfo,
   OirPlanInfo,
   OirSliceData,
@@ -356,6 +357,13 @@ export const approveExternalAndCalculate = (planId: number, fractionNumber: numb
 export const cancelSyntheticCT = (planId: number, fractionNumber: number) =>
   api
     .post(`/plans/${planId}/synthetic-ct/${fractionNumber}/cancel`)
+    .then((r) => r.data);
+
+export const getSyntheticCTDVH = (planId: number, fractionNumber: number, recompute: boolean = false) =>
+  api
+    .get<SyntheticCTDVHResponse>(
+      `/plans/${planId}/synthetic-ct/${fractionNumber}/dvh?recompute=${recompute}`
+    )
     .then((r) => r.data);
 
 export const syntheticCTReportUrl = (

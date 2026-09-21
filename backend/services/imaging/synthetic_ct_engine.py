@@ -344,7 +344,57 @@ def build_virtual_ct(
         "displacement_mm_mean": float(mag[mask_np].mean()) if mask_np.any() else 0.0,
         "displacement_mm_p99": float(np.percentile(mag[mask_np], 99)) if mask_np.any() else 0.0,
         "fov_fraction": float(mask_np.mean()),
+        "field": field,
     }
+
+
+def deform_mask(mask_kji: np.ndarray, geometry: VolumeGeometry, field: sitk.Image) -> np.ndarray:
+    """Deform a 3D binary ROI mask using the DIR displacement field."""
+    mask_sitk = _to_sitk(mask_kji.astype(np.uint8), geometry)
+    tx = sitk.DisplacementFieldTransform(sitk.Image(field))
+    ref = sitk.Image(field)
+    deformed = sitk.Resample(mask_sitk, ref, tx, sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8)
+    return sitk.GetArrayFromImage(deformed) > 0
+
+
+def propagate_rois_through_dir(
+    rois: list[dict[str, Any]],
+    geometry: VolumeGeometry,
+    field: sitk.Image,
+) -> list[dict[str, Any]]:
+    """
+    Deforms a list of planning ROIs (from RTSTRUCT) onto the synthetic CT anatomy
+    using the DIR displacement field.
+    Returns the list of ROIs with both 'mask' (deformed) and 'planned_mask' (original),
+    along with 'planned_volume_cc' and 'deformed_volume_cc'.
+    """
+    tx = sitk.DisplacementFieldTransform(sitk.Image(field))
+    ref = sitk.Image(field)
+    sx, sy, sz = geometry.spacing_mm
+    voxel_vol_cc = (float(sx) * float(sy) * float(sz)) / 1000.0
+
+    propagated = []
+    for r in rois:
+        orig_mask = r["mask"]
+        orig_vol_cc = r.get("volume_cc", round(float(orig_mask.sum()) * voxel_vol_cc, 2))
+        mask_sitk = _to_sitk(orig_mask.astype(np.uint8), geometry)
+        deformed_sitk = sitk.Resample(mask_sitk, ref, tx, sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8)
+        deformed_mask = sitk.GetArrayFromImage(deformed_sitk) > 0
+        deformed_vol_cc = round(float(deformed_mask.sum()) * voxel_vol_cc, 2)
+
+        propagated.append({
+            "roi_number": r["roi_number"],
+            "name": r["name"],
+            "type": r["type"],
+            "is_target": r["is_target"],
+            "color": r["color"],
+            "mask": deformed_mask,
+            "planned_mask": orig_mask,
+            "volume_cc": deformed_vol_cc,
+            "deformed_volume_cc": deformed_vol_cc,
+            "planned_volume_cc": orig_vol_cc,
+        })
+    return propagated
 
 
 def export_ct_series(

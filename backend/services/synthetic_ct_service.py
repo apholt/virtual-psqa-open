@@ -13,6 +13,7 @@ Handles:
 """
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import zipfile
@@ -22,6 +23,7 @@ from typing import Any, Optional, Union
 
 import numpy as np
 import pydicom
+from scipy.ndimage import map_coordinates, shift as scipy_shift
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -30,10 +32,17 @@ from models.fraction import Fraction
 from models.plan import Plan
 from models.synthetic_ct import SyntheticCT
 from services.dose_grid import DoseGrid
+from services.dvh_service import (
+    compute_cumulative_dvh,
+    extract_percentile_metrics,
+    generate_fallback_rois,
+    load_rois_from_rtstruct,
+)
 from services.gamma_analysis import _resample_to
 from services.gamma_engine import gamma_3d
 from services.imaging import (
     RigidTransform,
+    VolumeGeometry,
     apply_external_mask_to_volume,
     build_virtual_ct,
     compute_cbct_external_mask,
@@ -44,6 +53,7 @@ from services.imaging import (
     load_cbct_series,
     load_external_mask,
     make_transform,
+    propagate_rois_through_dir,
     resample_to_reference,
     save_external_mask,
     to_sitk_fixed_to_moving,
@@ -51,6 +61,76 @@ from services.imaging import (
 from services.mcSquare_runner import run_mcSquare_synthetic_ct
 
 logger = logging.getLogger(__name__)
+
+
+def save_deformed_rois(output_path: Path, deformed_rois: list[dict[str, Any]]) -> None:
+    """Save deformed and original planning ROI masks and metadata to compressed .npz."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = []
+    arrays = {}
+    for roi in deformed_rois:
+        num = roi["roi_number"]
+        arrays[f"mask_{num}"] = roi["mask"].astype(bool)
+        if "planned_mask" in roi:
+            arrays[f"planned_mask_{num}"] = roi["planned_mask"].astype(bool)
+        metadata.append({
+            "roi_number": num,
+            "name": roi["name"],
+            "type": roi["type"],
+            "is_target": roi["is_target"],
+            "color": roi["color"],
+            "volume_cc": roi.get("volume_cc", 0.0),
+            "deformed_volume_cc": roi.get("deformed_volume_cc", 0.0),
+            "planned_volume_cc": roi.get("planned_volume_cc", 0.0),
+        })
+    np.savez_compressed(str(output_path), metadata=json.dumps(metadata), **arrays)
+
+
+def load_saved_deformed_rois(npz_path: Path) -> list[dict[str, Any]]:
+    """Load deformed and original planning ROI masks and metadata from .npz."""
+    if not npz_path.is_file():
+        return []
+    try:
+        data = np.load(str(npz_path))
+        meta_list = json.loads(str(data["metadata"]))
+        rois = []
+        for item in meta_list:
+            num = item["roi_number"]
+            mask = data[f"mask_{num}"]
+            planned_mask = data[f"planned_mask_{num}"] if f"planned_mask_{num}" in data else mask
+            rois.append({
+                **item,
+                "mask": mask,
+                "planned_mask": planned_mask,
+            })
+        return rois
+    except Exception as exc:
+        logger.warning(f"Could not load deformed ROIs from {npz_path}: {exc}")
+        return []
+
+
+def _resample_mask(mask: np.ndarray, src_grid: DoseGrid, dst_grid: DoseGrid) -> np.ndarray:
+    """Resample 3D binary mask from src_grid to dst_grid using nearest neighbor interpolation."""
+    if (
+        mask.shape == dst_grid.shape
+        and np.allclose(src_grid.spacing, dst_grid.spacing)
+        and np.allclose(src_grid.origin, dst_grid.origin)
+    ):
+        return mask
+
+    sz, sy, sx = (float(v) for v in src_grid.spacing)
+    oz, oy, ox = (float(v) for v in src_grid.origin)
+    tz, ty, tx = (float(v) for v in dst_grid.spacing)
+    poz, poy, pox = (float(v) for v in dst_grid.origin)
+    nz, ny, nx = dst_grid.shape
+
+    zi = (poz + np.arange(nz) * tz - oz) / sz
+    yi = (poy + np.arange(ny) * ty - oy) / sy
+    xi = (pox + np.arange(nx) * tx - ox) / sx
+
+    ZI, YI, XI = np.meshgrid(zi, yi, xi, indexing="ij")
+    resampled = map_coordinates(mask.astype(np.float32), [ZI, YI, XI], order=0, mode="constant", cval=0.0)
+    return resampled > 0.5
 
 
 def _sct_dir(plan_id: int, fraction_number: int) -> Path:
@@ -609,12 +689,33 @@ def generate_synthetic_ct(
         # Save unmasked deformed volume so external contour can be recomputed rapidly
         np.savez_compressed(str(sct_base_dir / "raw_sct.npz"), sct=raw_sct_kji)
 
+        # 5b. Propagate planning RTSTRUCT target & OAR contours onto deformed Synthetic CT geometry
+        rtstruct_file = _find_rtstruct_file(plan)
+        if rtstruct_file and "field" in result:
+            try:
+                ct_dose_grid = DoseGrid(
+                    array=np.zeros(
+                        (plan_geom.size_voxels[2], plan_geom.size_voxels[1], plan_geom.size_voxels[0]),
+                        dtype=np.float32,
+                    ),
+                    spacing=(plan_geom.spacing_mm[2], plan_geom.spacing_mm[1], plan_geom.spacing_mm[0]),
+                    origin=(plan_geom.origin_lps[2], plan_geom.origin_lps[1], plan_geom.origin_lps[0]),
+                )
+                planning_rois = load_rois_from_rtstruct(rtstruct_file, ct_dose_grid)
+                if planning_rois:
+                    deformed_rois = propagate_rois_through_dir(planning_rois, plan_geom, result["field"])
+                    save_deformed_rois(sct_base_dir / "deformed_rois.npz", deformed_rois)
+                    logger.info(
+                        f"Propagated {len(deformed_rois)} ROIs through DIR for plan {plan_id} fx {fraction_number}"
+                    )
+            except Exception as exc:
+                logger.warning(f"Could not propagate RTSTRUCT ROIs for plan {plan_id} fx {fraction_number}: {exc}")
+
         if job_id:
             from services.mcSquare_runner import _update_progress
             _update_progress(db, job_id, 0.65)
 
         # 6. Extract / compute robust external contour (zero interior voids, includes mask by default)
-        rtstruct_file = _find_rtstruct_file(plan)
         ext_mask, actual_source, mask_info = determine_external_mask(
             image_kji=raw_sct_kji,
             geometry=plan_geom,
@@ -806,6 +907,298 @@ def ingest_synthetic_ct_files(
     return sct
 
 
+def calculate_synthetic_ct_dvh(
+    plan_id: int,
+    fraction_number: int,
+    db: Session,
+    mc_grid: Optional[DoseGrid] = None,
+    tps_grid: Optional[DoseGrid] = None,
+    force_recompute: bool = False,
+) -> dict[str, Any]:
+    """
+    Evaluates cumulative Dose-Volume Histograms (DVH) and clinical coverage metrics
+    on deformed targets and Organs-At-Risk (OARs) for daily SyntheticQACT.
+    """
+    sct_dir = _sct_dir(plan_id, fraction_number)
+    out_dir = sct_dir / "output"
+    cache_file = out_dir / "dvh_sct.json"
+
+    if cache_file.is_file() and not force_recompute:
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    sct = (
+        db.query(SyntheticCT)
+        .filter_by(plan_id=plan_id, fraction_number=fraction_number)
+        .first()
+    )
+    if mc_grid is None:
+        if not sct or not sct.dose_path or not Path(sct.dose_path).exists():
+            raise FileNotFoundError(
+                f"No synthetic CT dose found for plan {plan_id} fraction {fraction_number}"
+            )
+
+    plan = db.query(Plan).filter_by(id=plan_id).first()
+    if not plan:
+        raise ValueError(f"Plan {plan_id} not found")
+
+    if tps_grid is None:
+        rtdose_path = (
+            find_rtdose_file(plan.dicom_store_path, plan_uid=plan.rtplan_uid)
+            if plan.dicom_store_path
+            else None
+        )
+        if not rtdose_path:
+            raise FileNotFoundError(f"No reference TPS RTDose found for plan {plan_id}")
+        tps_grid = load_rtdose(rtdose_path)
+
+    if mc_grid is None:
+        raw_mc = DoseGrid.load(sct.dose_path)
+        mc_grid = _resample_to(raw_mc, tps_grid)
+    elif mc_grid.shape != tps_grid.shape:
+        mc_grid = _resample_to(mc_grid, tps_grid)
+
+    target_gy = getattr(plan, "target_dose_gy", None)
+    rx_dose = (
+        float(target_gy)
+        if target_gy and target_gy > 0
+        else round(float(tps_grid.max_dose) * 0.95, 1)
+    )
+
+    # 1. Load ROIs (from deformed_rois.npz, or RTSTRUCT fallback, or isodose fallback)
+    rois: list[dict[str, Any]] = []
+    deformed_npz = sct_dir / "deformed_rois.npz"
+
+    if deformed_npz.is_file():
+        saved_rois = load_saved_deformed_rois(deformed_npz)
+        if saved_rois:
+            plan_arr, plan_geom, _ = (
+                find_planning_ct_series(plan.dicom_store_path)
+                if plan.dicom_store_path
+                else (None, None, None)
+            )
+            if plan_geom is not None and plan_arr is not None:
+                ct_grid = DoseGrid(
+                    array=np.zeros(plan_arr.shape, dtype=np.float32),
+                    spacing=(plan_geom.spacing_mm[2], plan_geom.spacing_mm[1], plan_geom.spacing_mm[0]),
+                    origin=(plan_geom.origin_lps[2], plan_geom.origin_lps[1], plan_geom.origin_lps[0]),
+                )
+            else:
+                ct_grid = tps_grid
+
+            for r in saved_rois:
+                def_m = _resample_mask(r["mask"], ct_grid, tps_grid)
+                plan_m = _resample_mask(r.get("planned_mask", r["mask"]), ct_grid, tps_grid)
+                if def_m.any() or plan_m.any():
+                    rois.append({
+                        **r,
+                        "mask": def_m,
+                        "planned_mask": plan_m,
+                    })
+
+    if not rois:
+        # Fallback: Load directly from RTSTRUCT onto tps_grid
+        rtstruct_file = _find_rtstruct_file(plan)
+        if rtstruct_file:
+            raw_rois = load_rois_from_rtstruct(rtstruct_file, tps_grid)
+            dz = float(sct.setup_shift_vert_mm or 0.0) / tps_grid.spacing[0]
+            dy = float(sct.setup_shift_long_mm or 0.0) / tps_grid.spacing[1]
+            dx = float(sct.setup_shift_lat_mm or 0.0) / tps_grid.spacing[2]
+            shift_vec = (-dz, -dy, -dx)
+            has_shift = abs(dz) > 1e-3 or abs(dy) > 1e-3 or abs(dx) > 1e-3
+
+            for r in raw_rois:
+                plan_m = r["mask"]
+                if has_shift:
+                    def_m = scipy_shift(plan_m.astype(float), shift_vec, order=0, mode="constant", cval=0.0) > 0.5
+                else:
+                    def_m = plan_m
+                rois.append({
+                    **r,
+                    "mask": def_m,
+                    "planned_mask": plan_m,
+                    "deformed_volume_cc": round(
+                        float(def_m.sum()) * (tps_grid.spacing[0] * tps_grid.spacing[1] * tps_grid.spacing[2]) / 1000.0,
+                        2,
+                    ),
+                    "planned_volume_cc": r["volume_cc"],
+                })
+
+    if not rois:
+        fallback_rois = generate_fallback_rois(tps_grid, rx_dose)
+        for r in fallback_rois:
+            rois.append({
+                **r,
+                "planned_mask": r["mask"],
+                "deformed_volume_cc": r["volume_cc"],
+                "planned_volume_cc": r["volume_cc"],
+            })
+
+    # 2. Uniform dose axis
+    max_d = max(float(mc_grid.max_dose), float(tps_grid.max_dose))
+    upper_d = float(np.ceil(max_d * 1.08)) if max_d > 0 else 10.0
+    dose_axis = np.linspace(0.0, upper_d, 120, dtype=np.float32)
+    dose_bins_gy = [round(float(d), 2) for d in dose_axis]
+
+    targets: list[dict[str, Any]] = []
+    oars: list[dict[str, Any]] = []
+    all_targets_passed = True
+    any_target_warning = False
+
+    vox_vol_cc = (tps_grid.spacing[0] * tps_grid.spacing[1] * tps_grid.spacing[2]) / 1000.0
+
+    for roi in rois:
+        def_mask = roi["mask"]
+        plan_mask = roi.get("planned_mask", def_mask)
+        is_target = bool(roi.get("is_target", False))
+
+        if not def_mask.any() and not plan_mask.any():
+            continue
+
+        sct_dvh = compute_cumulative_dvh(mc_grid.array, def_mask, dose_axis)
+        tps_dvh = compute_cumulative_dvh(tps_grid.array, plan_mask, dose_axis)
+
+        sct_m = extract_percentile_metrics(mc_grid.array, def_mask, rx_dose)
+        tps_m = extract_percentile_metrics(tps_grid.array, plan_mask, rx_dose)
+
+        sct_v95 = (
+            round(float(np.mean(mc_grid.array[def_mask] >= 0.95 * rx_dose) * 100.0), 2)
+            if def_mask.any()
+            else 0.0
+        )
+        tps_v95 = (
+            round(float(np.mean(tps_grid.array[plan_mask] >= 0.95 * rx_dose) * 100.0), 2)
+            if plan_mask.any()
+            else 0.0
+        )
+        sct_m["v95_pct"] = sct_v95
+        tps_m["v95_pct"] = tps_v95
+
+        def_vol = roi.get("deformed_volume_cc") or round(float(def_mask.sum()) * vox_vol_cc, 2)
+        plan_vol = roi.get("planned_volume_cc") or round(float(plan_mask.sum()) * vox_vol_cc, 2)
+        vol_chg = (
+            round(((def_vol - plan_vol) / plan_vol) * 100.0, 1)
+            if plan_vol > 0
+            else 0.0
+        )
+
+        delta_m = {
+            "d98": round(sct_m["d98"] - tps_m["d98"], 2),
+            "d95": round(sct_m["d95"] - tps_m["d95"], 2),
+            "d50": round(sct_m["d50"] - tps_m["d50"], 2),
+            "d2": round(sct_m["d2"] - tps_m["d2"], 2),
+            "d_mean": round(sct_m["d_mean"] - tps_m["d_mean"], 2),
+            "d_max": round(sct_m["d_max"] - tps_m["d_max"], 2),
+            "v95_pct": round(sct_v95 - tps_v95, 2),
+            "v100_pct": round(sct_m["v100_pct"] - tps_m["v100_pct"], 2),
+            "volume_change_pct": vol_chg,
+        }
+
+        if is_target:
+            if sct_v95 >= 95.0 and sct_m["d95"] >= 0.95 * rx_dose:
+                c_status = "PASS"
+                c_note = (
+                    f"Target coverage maintained: V95%={sct_v95:.1f}%, "
+                    f"D95={sct_m['d95']:.1f} Gy ({sct_m['d95']/rx_dose*100:.1f}% Rx)."
+                )
+            elif sct_v95 >= 90.0 and sct_m["d95"] >= 0.90 * rx_dose:
+                c_status = "WARNING"
+                c_note = f"Marginal target coverage: V95%={sct_v95:.1f}% (Plan: {tps_v95:.1f}%), D95={sct_m['d95']:.1f} Gy."
+                all_targets_passed = False
+                any_target_warning = True
+            else:
+                c_status = "FAIL"
+                c_note = (
+                    f"Target undercoverage alert: V95% dropped to {sct_v95:.1f}% (Plan: {tps_v95:.1f}%), "
+                    f"D95={sct_m['d95']:.1f} Gy < 90% Rx. Adaptive replan recommended."
+                )
+                all_targets_passed = False
+
+            targets.append({
+                "roi_number": roi["roi_number"],
+                "name": roi["name"],
+                "type": roi["type"],
+                "color": roi["color"],
+                "is_target": True,
+                "planned_volume_cc": plan_vol,
+                "deformed_volume_cc": def_vol,
+                "volume_change_pct": vol_chg,
+                "coverage_status": c_status,
+                "coverage_note": c_note,
+                "planned_metrics": tps_m,
+                "deformed_metrics": sct_m,
+                "delta_metrics": delta_m,
+                "dvh": {
+                    "dose_bins_gy": dose_bins_gy,
+                    "tps_volume_pct": tps_dvh.tolist(),
+                    "sct_volume_pct": sct_dvh.tolist(),
+                },
+            })
+        else:
+            sparing_status = "PASS" if delta_m["d_mean"] <= 1.0 else ("WARNING" if delta_m["d_mean"] <= 3.0 else "ACTION")
+            sparing_note = (
+                "OAR sparing preserved."
+                if sparing_status == "PASS"
+                else f"OAR dose elevated on deformed anatomy (mean dose +{delta_m['d_mean']:.1f} Gy)."
+            )
+            oars.append({
+                "roi_number": roi["roi_number"],
+                "name": roi["name"],
+                "type": roi["type"],
+                "color": roi["color"],
+                "is_target": False,
+                "planned_volume_cc": plan_vol,
+                "deformed_volume_cc": def_vol,
+                "volume_change_pct": vol_chg,
+                "sparing_status": sparing_status,
+                "sparing_note": sparing_note,
+                "planned_metrics": tps_m,
+                "deformed_metrics": sct_m,
+                "delta_metrics": delta_m,
+                "dvh": {
+                    "dose_bins_gy": dose_bins_gy,
+                    "tps_volume_pct": tps_dvh.tolist(),
+                    "sct_volume_pct": sct_dvh.tolist(),
+                },
+            })
+
+    overall_status = "PASS" if all_targets_passed else ("WARNING" if any_target_warning else "FAIL")
+    overall_note = (
+        "Target coverage clinically acceptable across all deformed targets."
+        if overall_status == "PASS"
+        else (
+            "One or more targets have marginal coverage on daily deformed anatomy."
+            if overall_status == "WARNING"
+            else "Target undercoverage detected on deformed anatomy. Adaptive review recommended."
+        )
+    )
+
+    result_dict = {
+        "plan_id": plan_id,
+        "fraction_number": fraction_number,
+        "calculated_at": datetime.now(timezone.utc).isoformat(),
+        "prescription_dose_gy": rx_dose,
+        "overall_target_coverage": overall_status,
+        "overall_note": overall_note,
+        "num_targets": len(targets),
+        "num_oars": len(oars),
+        "targets": targets,
+        "oars": oars,
+    }
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(result_dict, f, indent=2)
+    except Exception as exc:
+        logger.warning(f"Could not write dvh_sct.json: {exc}")
+
+    return result_dict
+
+
 def calculate_synthetic_ct_dose(
     plan_id: int,
     fraction_number: int,
@@ -902,6 +1295,21 @@ def calculate_synthetic_ct_dose(
         sct.calculated_at = datetime.now(timezone.utc)
         sct.error_message = None
 
+        # Calculate DVH and clinical target coverage on deformed structures
+        dvh_results = None
+        try:
+            dvh_results = calculate_synthetic_ct_dvh(
+                plan_id=plan_id,
+                fraction_number=fraction_number,
+                db=db,
+                mc_grid=mc_resampled,
+                tps_grid=tps_grid,
+                force_recompute=True,
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to calculate deformed target DVH for plan {plan_id} fx {fraction_number}: {exc}")
+
+        sct.dvh_metrics = json.dumps(dvh_results) if dvh_results else None
         db.commit()
         db.refresh(sct)
         logger.info(
@@ -1387,6 +1795,10 @@ def list_synthetic_cts(plan_id: int, db: Session) -> list[dict[str, Any]]:
             "setup_shift_lat_mm": r.setup_shift_lat_mm,
             "setup_shift_long_mm": r.setup_shift_long_mm,
             "setup_shift_vert_mm": r.setup_shift_vert_mm,
+            "has_dvh": bool(
+                (r.dvh_metrics and len(r.dvh_metrics) > 10)
+                or (_sct_dir(r.plan_id, r.fraction_number) / "output" / "dvh_sct.json").is_file()
+            ),
             "created_at": r.created_at.isoformat() if r.created_at else None,
             "calculated_at": r.calculated_at.isoformat() if r.calculated_at else None,
         })
@@ -1402,6 +1814,19 @@ def get_synthetic_ct_detail(plan_id: int, fraction_number: int, db: Session) -> 
     )
     if not r:
         return None
+
+    dvh_summary = None
+    if r.dvh_metrics:
+        try:
+            dvh_data = json.loads(r.dvh_metrics)
+            dvh_summary = {
+                "overall_target_coverage": dvh_data.get("overall_target_coverage", "PASS"),
+                "overall_note": dvh_data.get("overall_note", ""),
+                "num_targets": dvh_data.get("num_targets", 0),
+                "num_oars": dvh_data.get("num_oars", 0),
+            }
+        except Exception:
+            pass
 
     return {
         "id": r.id,
@@ -1426,6 +1851,11 @@ def get_synthetic_ct_detail(plan_id: int, fraction_number: int, db: Session) -> 
         "error_message": r.error_message,
         "has_external_mask": bool((_sct_dir(plan_id, fraction_number) / "external_mask.npz").is_file()),
         "has_dose": bool(r.dose_path and Path(r.dose_path).exists()),
+        "has_dvh": bool(
+            (r.dvh_metrics and len(r.dvh_metrics) > 10)
+            or (_sct_dir(plan_id, fraction_number) / "output" / "dvh_sct.json").is_file()
+        ),
+        "dvh_summary": dvh_summary,
         "gamma_passing_rate": r.gamma_passing_rate,
         "gamma_2mm_passing_rate": r.gamma_2mm_passing_rate,
         "gamma_passed": r.gamma_passed,

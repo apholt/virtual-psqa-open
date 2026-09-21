@@ -24,6 +24,7 @@ from services.job_control import request_cancel
 from services.job_runner import run_qa_job
 from services.synthetic_ct_service import (
     approve_external_and_calculate_dose,
+    calculate_synthetic_ct_dvh,
     generate_synthetic_ct,
     get_cbct_image_plane,
     get_sct_dose_plane,
@@ -548,5 +549,32 @@ def cancel_fraction_calculation(
         "fraction_number": fraction_number,
         "cancelled_jobs": list(cancelled_ids),
     }
+
+
+@router.get("/{fraction_number}/dvh")
+def get_fraction_synthetic_ct_dvh(
+    plan_id: int,
+    fraction_number: int,
+    recompute: bool = Query(False, description="Force recompute of deformed target DVH"),
+    db: Session = Depends(get_db),
+):
+    """
+    Get cumulative Dose-Volume Histogram (DVH) curves and clinical target coverage
+    metrics for the deformed targets and OARs on the Synthetic CT.
+    """
+    try:
+        data = calculate_synthetic_ct_dvh(
+            plan_id=plan_id,
+            fraction_number=fraction_number,
+            db=db,
+            force_recompute=recompute,
+        )
+        return data
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        logger.exception(f"Error computing synthetic CT DVH: {exc}")
+        raise HTTPException(status_code=422, detail=str(exc))
+
 
 

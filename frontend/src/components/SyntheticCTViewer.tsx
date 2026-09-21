@@ -29,7 +29,13 @@ import {
   recomputeExternalContour,
   syntheticCTReportUrl,
 } from "../api/client";
-import { ExternalContourInfo, PlanSummary, SyntheticCTDetail, SyntheticCTSummary } from "../types";
+import {
+  ExternalContourInfo,
+  PlanSummary,
+  SyntheticCTDetail,
+  SyntheticCTSummary,
+} from "../types";
+import { DeformedDVHCard } from "./DeformedDVHCard";
 
 interface SyntheticCTViewerProps {
   planId: number;
@@ -683,7 +689,8 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
 
       {/* Selected Fraction Details & 3D Viewer */}
       {detail && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left Column: Adaptive QA Metrics & Actions */}
           <div className="space-y-4">
             {/* KPI Card */}
@@ -1428,7 +1435,16 @@ export const SyntheticCTViewer: React.FC<SyntheticCTViewerProps> = ({ planId }) 
             </div>
           </div>
         </div>
-      )}
+
+        {/* Deformed Target Coverage & Adaptive DVH Card */}
+        <DeformedDVHCard
+          planId={planId}
+          fractionNumber={selectedFraction}
+          hasDose={detail.has_dose}
+          hasDvh={detail.has_dvh}
+        />
+      </div>
+    )}
 
       {/* Upload CBCT Modal */}
       {showUploadModal && (

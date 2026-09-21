@@ -1493,6 +1493,202 @@ def build_synthetic_ct_report_html(
 
     parts.append('</tbody></table></div>')
 
+    # Deformed Target Coverage & Adaptive DVH Analysis
+    from types import SimpleNamespace
+    dvh_fraction_records = [
+        r for r in completed
+        if (
+            r.dvh_metrics
+            or (Path(settings.RESULTS_PATH) / f"plan_{plan_id}" / "synthetic_ct" / f"fx_{r.fraction_number}" / "output" / "dvh_sct.json").is_file()
+        )
+    ]
+    if dvh_fraction_records:
+        eval_r = (
+            next((r for r in dvh_fraction_records if r.fraction_number == fraction_number), dvh_fraction_records[-1])
+            if fraction_number is not None
+            else dvh_fraction_records[-1]
+        )
+        dvh_file = Path(settings.RESULTS_PATH) / f"plan_{plan_id}" / "synthetic_ct" / f"fx_{eval_r.fraction_number}" / "output" / "dvh_sct.json"
+        dvh_data = None
+        if eval_r.dvh_metrics:
+            try:
+                dvh_data = json.loads(eval_r.dvh_metrics)
+            except Exception:
+                pass
+        if not dvh_data and dvh_file.is_file():
+            try:
+                with open(dvh_file, "r", encoding="utf-8") as f:
+                    dvh_data = json.load(f)
+            except Exception:
+                pass
+
+        if dvh_data:
+            targets = dvh_data.get("targets", [])
+            oars = dvh_data.get("oars", [])
+            rx_d = dvh_data.get("prescription_dose_gy")
+            overall_cov = dvh_data.get("overall_target_coverage", "PASS")
+            cov_badge_col = "#3fb950" if overall_cov == "PASS" else ("#d29922" if overall_cov == "WARNING" else "#f85149")
+
+            parts.append(
+                f'<div class="card">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">'
+                f'  <h2 style="margin:0;">Deformed Target Coverage &amp; Adaptive DVH (Fraction {eval_r.fraction_number})</h2>'
+                f'  <span class="badge-mini" style="background:{cov_badge_col}22;color:{cov_badge_col};font-weight:700;font-size:12px;padding:4px 10px;">TARGET COVERAGE: {overall_cov}</span>'
+                f'</div>'
+            )
+            if dvh_data.get("overall_note"):
+                parts.append(f'<div class="muted" style="margin-bottom:12px;font-size:12px;">{escape(dvh_data["overall_note"])}</div>')
+
+            if targets:
+                parts.append('<h3 style="font-size:13px;color:#f0f6fc;margin-top:8px;margin-bottom:6px;">Target Structures Coverage Fidelity</h3>')
+                parts.append('<table class="tbl"><thead><tr>'
+                             '<th>Target</th><th>Plan Vol</th><th>Deformed Vol</th><th>Vol &Delta;</th><th>Plan D95</th><th>sCT D95</th><th>&Delta; D95</th><th>Plan V95%</th><th>sCT V95%</th><th>Coverage Status</th>'
+                             '</tr></thead><tbody>')
+                for t in targets:
+                    c_col = t.get("color", "#ef4444")
+                    st = t.get("coverage_status", "PASS")
+                    st_col = "#3fb950" if st == "PASS" else ("#d29922" if st == "WARNING" else "#f85149")
+                    p_vol = f"{t.get('planned_volume_cc', 0):.1f} cc"
+                    d_vol = f"{t.get('deformed_volume_cc', 0):.1f} cc"
+                    v_chg = f"{t.get('volume_change_pct', 0):+.1f}%"
+                    pm = t.get("planned_metrics", {})
+                    dm = t.get("deformed_metrics", {})
+                    delm = t.get("delta_metrics", {})
+                    pd95 = f"{pm.get('d95', 0):.1f} Gy"
+                    dd95 = f"{dm.get('d95', 0):.1f} Gy"
+                    del_d95 = f"{delm.get('d95', 0):+.1f} Gy"
+                    pv95 = f"{pm.get('v95_pct', 0):.1f}%"
+                    dv95 = f"{dm.get('v95_pct', 0):.1f}%"
+                    parts.append(
+                        f'<tr>'
+                        f'<td><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:{c_col};margin-right:6px;"></span><b>{escape(t["name"])}</b></td>'
+                        f'<td class="num">{p_vol}</td>'
+                        f'<td class="num">{d_vol}</td>'
+                        f'<td class="num">{v_chg}</td>'
+                        f'<td class="num">{pd95}</td>'
+                        f'<td class="num" style="font-weight:700;">{dd95}</td>'
+                        f'<td class="num">{del_d95}</td>'
+                        f'<td class="num">{pv95}</td>'
+                        f'<td class="num" style="font-weight:700;color:{st_col};">{dv95}</td>'
+                        f'<td><span class="badge-mini" style="background:{st_col}22;color:{st_col};">{st}</span></td>'
+                        f'</tr>'
+                    )
+                parts.append('</tbody></table>')
+
+            if oars:
+                parts.append('<h3 style="font-size:13px;color:#f0f6fc;margin-top:14px;margin-bottom:6px;">Organs-at-Risk (OAR) Sparing Fidelity</h3>')
+                parts.append('<table class="tbl"><thead><tr>'
+                             '<th>Organ at Risk</th><th>Plan Vol</th><th>Deformed Vol</th><th>Plan Dmean</th><th>sCT Dmean</th><th>&Delta; Dmean</th><th>sCT D2%</th><th>Sparing Verdict</th>'
+                             '</tr></thead><tbody>')
+                for o in oars:
+                    c_col = o.get("color", "#3b82f6")
+                    sp = o.get("sparing_status", "PASS")
+                    sp_col = "#3fb950" if sp == "PASS" else ("#d29922" if sp == "WARNING" else "#f85149")
+                    p_vol = f"{o.get('planned_volume_cc', 0):.1f} cc"
+                    d_vol = f"{o.get('deformed_volume_cc', 0):.1f} cc"
+                    pm = o.get("planned_metrics", {})
+                    dm = o.get("deformed_metrics", {})
+                    delm = o.get("delta_metrics", {})
+                    pd_mean = f"{pm.get('d_mean', 0):.1f} Gy"
+                    dd_mean = f"{dm.get('d_mean', 0):.1f} Gy"
+                    del_dm = f"{delm.get('d_mean', 0):+.1f} Gy"
+                    d2 = f"{dm.get('d2', 0):.1f} Gy"
+                    parts.append(
+                        f'<tr>'
+                        f'<td><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:{c_col};margin-right:6px;"></span>{escape(o["name"])}</td>'
+                        f'<td class="num">{p_vol}</td>'
+                        f'<td class="num">{d_vol}</td>'
+                        f'<td class="num">{pd_mean}</td>'
+                        f'<td class="num">{dd_mean}</td>'
+                        f'<td class="num">{del_dm}</td>'
+                        f'<td class="num">{d2}</td>'
+                        f'<td><span class="badge-mini" style="background:{sp_col}22;color:{sp_col};">{sp}</span></td>'
+                        f'</tr>'
+                    )
+                parts.append('</tbody></table>')
+
+            # Render separate DVH plots for Targets and OARs
+            target_objs = [
+                SimpleNamespace(
+                    name=t["name"],
+                    color=t.get("color", "#ef4444"),
+                    type=t.get("type", "TARGET"),
+                    is_target=True,
+                    dvh=SimpleNamespace(
+                        dose_bins_gy=t["dvh"]["dose_bins_gy"],
+                        tps_volume_pct=t["dvh"]["tps_volume_pct"],
+                        mc_nominal_volume_pct=t["dvh"]["sct_volume_pct"],
+                        mc_min_volume_pct=None,
+                        mc_max_volume_pct=None,
+                    ),
+                )
+                for t in targets
+                if t.get("dvh") and t["dvh"].get("dose_bins_gy")
+            ]
+
+            oar_objs = [
+                SimpleNamespace(
+                    name=o["name"],
+                    color=o.get("color", "#3b82f6"),
+                    type=o.get("type", "OAR"),
+                    is_target=False,
+                    dvh=SimpleNamespace(
+                        dose_bins_gy=o["dvh"]["dose_bins_gy"],
+                        tps_volume_pct=o["dvh"]["tps_volume_pct"],
+                        mc_nominal_volume_pct=o["dvh"]["sct_volume_pct"],
+                        mc_min_volume_pct=None,
+                        mc_max_volume_pct=None,
+                    ),
+                )
+                for o in oars
+                if o.get("dvh") and o["dvh"].get("dose_bins_gy")
+            ]
+
+            max_dose = 10.0
+            if rx_d:
+                max_dose = max(max_dose, float(rx_d) * 1.15)
+            for t_obj in target_objs + oar_objs:
+                if t_obj.dvh.dose_bins_gy:
+                    max_dose = max(max_dose, float(t_obj.dvh.dose_bins_gy[-1]))
+
+            both_plots = bool(target_objs and oar_objs)
+            plot_w = 370 if both_plots else 760
+            plot_h = 230
+
+            plots_html = []
+            if target_objs:
+                plots_html.append(_render_dvh_panel(
+                    rois=target_objs,
+                    title="Deformed Target Structures",
+                    max_dose=max_dose,
+                    rx_dose=rx_d,
+                    is_target=True,
+                    w=plot_w,
+                    h=plot_h,
+                ))
+            if oar_objs:
+                plots_html.append(_render_dvh_panel(
+                    rois=oar_objs,
+                    title="Deformed Organs-at-Risk (OARs)",
+                    max_dose=max_dose,
+                    rx_dose=rx_d,
+                    is_target=False,
+                    w=plot_w,
+                    h=plot_h,
+                ))
+
+            if plots_html:
+                parts.append('<div style="margin-top:16px;">')
+                parts.append('<div style="display:flex;flex-wrap:wrap;gap:16px;justify-content:space-between;">')
+                parts.extend(plots_html)
+                parts.append('</div>')
+                parts.append('<div class="muted" style="text-align:center;margin-top:8px;font-size:11px;">'
+                             'Solid Line: Daily SyntheticQACT Monte Carlo Dose &middot; Dashed Line: Planned TPS Reference Dose'
+                             '</div>')
+                parts.append('</div>')
+
+            parts.append('</div>')
+
     # Visual Gamma Thumbnails for evaluated fractions
     gamma_boxes = []
     for r in records:

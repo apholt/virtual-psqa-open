@@ -412,6 +412,13 @@ export interface SyntheticCTSummary {
   mae_hu_after: number | null;
   status: "cbct_uploaded" | "generating" | "contour_check" | "pending" | "running" | "complete" | "error";
   has_external_mask?: boolean;
+  has_dvh?: boolean;
+  dvh_summary?: {
+    overall_target_coverage: "PASS" | "WARNING" | "FAIL";
+    overall_note: string;
+    num_targets: number;
+    num_oars: number;
+  } | null;
   gamma_passing_rate: number | null;
   gamma_2mm_passing_rate: number | null;
   gamma_passed: boolean | null;
@@ -429,6 +436,85 @@ export interface SyntheticCTDetail extends SyntheticCTSummary {
   study_instance_uid: string | null;
   error_message: string | null;
   has_dose: boolean;
+}
+
+export interface DeformedDVHMetrics {
+  d98: number;
+  d95: number;
+  d50: number;
+  d2: number;
+  d_mean: number;
+  d_max: number;
+  d_min?: number;
+  v95_pct?: number;
+  v100_pct?: number;
+}
+
+export interface DeformedDVHCurve {
+  dose_bins_gy: number[];
+  tps_volume_pct: number[];
+  sct_volume_pct: number[];
+}
+
+export interface DeformedTargetCoverage {
+  roi_number: number;
+  name: string;
+  type: string;
+  color: string;
+  is_target: boolean;
+  planned_volume_cc: number;
+  deformed_volume_cc: number;
+  volume_change_pct: number;
+  coverage_status: "PASS" | "WARNING" | "FAIL";
+  coverage_note: string;
+  planned_metrics: DeformedDVHMetrics;
+  deformed_metrics: DeformedDVHMetrics;
+  delta_metrics: {
+    d98: number;
+    d95: number;
+    d50: number;
+    d2: number;
+    d_mean: number;
+    v95_pct: number;
+    v100_pct: number;
+    volume_change_pct: number;
+  };
+  dvh: DeformedDVHCurve;
+}
+
+export interface DeformedOARCoverage {
+  roi_number: number;
+  name: string;
+  type: string;
+  color: string;
+  is_target: boolean;
+  planned_volume_cc: number;
+  deformed_volume_cc: number;
+  volume_change_pct: number;
+  sparing_status: "PASS" | "WARNING" | "ACTION";
+  sparing_note: string;
+  planned_metrics: DeformedDVHMetrics;
+  deformed_metrics: DeformedDVHMetrics;
+  delta_metrics: {
+    d2: number;
+    d_mean: number;
+    d_max: number;
+    volume_change_pct: number;
+  };
+  dvh: DeformedDVHCurve;
+}
+
+export interface SyntheticCTDVHResponse {
+  plan_id: number;
+  fraction_number: number;
+  calculated_at: string;
+  prescription_dose_gy: number;
+  overall_target_coverage: "PASS" | "WARNING" | "FAIL";
+  overall_note: string;
+  num_targets: number;
+  num_oars: number;
+  targets: DeformedTargetCoverage[];
+  oars: DeformedOARCoverage[];
 }
 
 export interface ExternalContourROI {
