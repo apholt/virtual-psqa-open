@@ -1083,16 +1083,6 @@ def build_secondary_dose_report_html(
         next((r for r in gamma_rows if r.field_name == "Composite" or r.beam_number is None), None),
     )
 
-    # If composite row is missing but beams exist, compute and persist the true composite 3D gamma
-    if composite_row is None:
-        try:
-            from services.gamma_analysis import ensure_composite_gamma
-            composite_row = ensure_composite_gamma(plan_id, db)
-            if composite_row:
-                gamma_rows.insert(0, composite_row)
-        except Exception as _c_err:
-            logger.debug(f"ensure_composite_gamma in report {plan_id}: {_c_err}")
-
     # Deduplicate beam rows so each beam is listed exactly once (latest calculation)
     beam_dict: dict[Any, GammaResult] = {}
     for r in gamma_rows:
