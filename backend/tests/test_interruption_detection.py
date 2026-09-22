@@ -4,6 +4,7 @@ import pytest
 import pydicom
 from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.sequence import Sequence
+from pydicom.uid import generate_uid
 from fastapi.testclient import TestClient
 
 from database import SessionLocal, ensure_schema
@@ -23,7 +24,7 @@ def _make_dummy_plan():
     plan = Dataset()
     plan.Modality = "RTPLAN"
     plan.SOPClassUID = "1.2.840.10008.5.1.4.1.1.481.8"
-    plan.SOPInstanceUID = "1.2.826.0.1.3680043.9.7243.plan.1"
+    plan.SOPInstanceUID = generate_uid()
     plan.PatientID = "TEST_INTERRUPT_PT"
     plan.PatientName = "Test^Patient"
 
@@ -45,7 +46,7 @@ def _make_dummy_record():
     rec = Dataset()
     rec.Modality = "RTRECORD"
     rec.SOPClassUID = "1.2.840.10008.5.1.4.1.1.481.7"
-    rec.SOPInstanceUID = "1.2.826.0.1.3680043.9.7243.rec.1"
+    rec.SOPInstanceUID = generate_uid()
     rec.PatientID = "TEST_INTERRUPT_PT"
     rec.TreatmentDate = "20260917"
     rec.TreatmentTime = "120000"
@@ -147,7 +148,7 @@ def test_reupload_fraction_record_endpoint(tmp_path):
 
         plan_dcm = _make_dummy_plan()
         plan_dcm.PatientID = pat.patient_id
-        plan_dcm.SOPInstanceUID = f"1.2.826.0.1.3680043.9.7243.{uid_rand}.plan"
+        plan_dcm.SOPInstanceUID = generate_uid()
         file_meta = FileMetaDataset()
         file_meta.MediaStorageSOPClassUID = plan_dcm.SOPClassUID
         file_meta.MediaStorageSOPInstanceUID = plan_dcm.SOPInstanceUID
@@ -185,7 +186,7 @@ def test_reupload_fraction_record_endpoint(tmp_path):
         # Now re-upload a fixed / complete record for Fraction 1
         rec = _make_dummy_record()
         rec.PatientID = pat.patient_id
-        rec.SOPInstanceUID = f"1.2.826.0.1.3680043.9.7243.{uid_rand}.rec"
+        rec.SOPInstanceUID = generate_uid()
         rec_meta = FileMetaDataset()
         rec_meta.MediaStorageSOPClassUID = rec.SOPClassUID
         rec_meta.MediaStorageSOPInstanceUID = rec.SOPInstanceUID
@@ -214,4 +215,11 @@ def test_reupload_fraction_record_endpoint(tmp_path):
         assert not frac.is_interrupted
         assert frac.interruption_reason is None
     finally:
+        try:
+            db.delete(frac)
+            db.delete(plan)
+            db.delete(pat)
+            db.commit()
+        except Exception:
+            db.rollback()
         db.close()

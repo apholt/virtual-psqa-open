@@ -5,6 +5,7 @@ import numpy as np
 import pydicom
 from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.sequence import Sequence
+from pydicom.uid import generate_uid
 
 from Process.RTstruct import RTstruct
 from Process.DVH import DVH
@@ -19,7 +20,7 @@ class MockCT:
         self.PixelSpacing = [2.0, 2.0, 3.0]
         self.ImagePositionPatient = [-20.0, -20.0, 0.0]
         self.NumVoxels = 20 * 20 * 10
-        self.SOPInstanceUIDs = [f"sop.{i}" for i in range(10)]
+        self.SOPInstanceUIDs = [f"1.2.840.10008.1.1.{i}" for i in range(10)]
 
 
 def create_test_rtstruct_dicom(
@@ -28,17 +29,18 @@ def create_test_rtstruct_dicom(
     empty_roi_display_color: bool = False,
     include_orphan_roi: bool = True,
     include_empty_contour: bool = True,
+    series_instance_uid: str = "1.2.840.10008.1.2",
 ):
     file_meta = FileMetaDataset()
     file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.481.3"
-    file_meta.MediaStorageSOPInstanceUID = "1.2.826.0.1.3680043.9.7243.rtstruct.1"
+    file_meta.MediaStorageSOPInstanceUID = generate_uid()
     file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
     ds = pydicom.dataset.FileDataset(str(file_path), {}, file_meta=file_meta, preamble=b"\0" * 128)
     ds.Modality = "RTSTRUCT"
     ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.481.3"
     ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
-    ds.SeriesInstanceUID = "1.2.826.0.1.3680043.9.7243.structseries.1"
+    ds.SeriesInstanceUID = series_instance_uid
 
     # StructureSetROISequence
     roi1 = Dataset()
@@ -98,7 +100,7 @@ def create_test_rtstruct_dicom(
         -5.0, 5.0, 3.0,
     ]
     s1_img = Dataset()
-    s1_img.ReferencedSOPInstanceUID = "sop.1"
+    s1_img.ReferencedSOPInstanceUID = "1.2.840.10008.1.1.1"
     s1.ContourImageSequence = Sequence([s1_img])
     c1.ContourSequence = Sequence([s1])
 
@@ -118,7 +120,7 @@ def create_test_rtstruct_dicom(
         -2.0, 2.0, 6.0,
     ]
     s2_img = Dataset()
-    s2_img.ReferencedSOPInstanceUID = "sop.2"
+    s2_img.ReferencedSOPInstanceUID = "1.2.840.10008.1.1.2"
     s2.ContourImageSequence = Sequence([s2_img])
     c2.ContourSequence = Sequence([s2])
 
@@ -148,7 +150,7 @@ def test_import_dicom_struct_without_roidisplaycolor():
 
         mock_ct = MockCT()
         rt = RTstruct()
-        rt.SeriesInstanceUID = "1.2.826.0.1.3680043.9.7243.structseries.1"
+        rt.SeriesInstanceUID = "1.2.840.10008.1.2"
         rt.DcmFile = str(rtstruct_path)
 
         # This previously raised AttributeError: 'Dataset' object has no attribute 'ROIDisplayColor'
@@ -185,7 +187,7 @@ def test_import_dicom_struct_empty_color_and_orphans():
 
         mock_ct = MockCT()
         rt = RTstruct()
-        rt.SeriesInstanceUID = "1.2.826.0.1.3680043.9.7243.structseries.1"
+        rt.SeriesInstanceUID = "1.2.840.10008.1.2"
         rt.DcmFile = str(rtstruct_path)
 
         rt.import_Dicom_struct(mock_ct)

@@ -5,6 +5,7 @@ import numpy as np
 import pydicom
 from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.sequence import Sequence
+from pydicom.uid import generate_uid
 
 from services.dose_grid import DoseGrid
 from services.gamma_analysis import (
@@ -25,7 +26,7 @@ def create_rtstruct_with_roi(
     file_path = dir_path / "rtstruct.dcm"
     file_meta = FileMetaDataset()
     file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.481.3"
-    file_meta.MediaStorageSOPInstanceUID = f"1.2.826.0.1.3680043.9.7243.rtstruct.{roi_name}"
+    file_meta.MediaStorageSOPInstanceUID = generate_uid()
     file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
     ds = pydicom.dataset.FileDataset(str(file_path), {}, file_meta=file_meta, preamble=b"\0" * 128)
@@ -199,7 +200,7 @@ def test_find_rtdose_file_skips_beam_doses():
         file_path = tmp_path / "beam1_dose.dcm"
         file_meta = FileMetaDataset()
         file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.481.2"
-        file_meta.MediaStorageSOPInstanceUID = "1.2.826.0.1.3680043.9.7243.rtdose.beam1"
+        file_meta.MediaStorageSOPInstanceUID = generate_uid()
         file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
         ds = pydicom.dataset.FileDataset(str(file_path), {}, file_meta=file_meta, preamble=b"\0" * 128)
@@ -208,8 +209,9 @@ def test_find_rtdose_file_skips_beam_doses():
         ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
         ds.DoseSummationType = "BEAM"
 
+        ref_plan_uid = generate_uid()
         ref_plan = Dataset()
-        ref_plan.ReferencedSOPInstanceUID = "1.2.3.plan"
+        ref_plan.ReferencedSOPInstanceUID = ref_plan_uid
         ref_fg = Dataset()
         ref_fg.ReferencedFractionGroupNumber = 1
         ref_beam = Dataset()
@@ -221,7 +223,7 @@ def test_find_rtdose_file_skips_beam_doses():
         ds.save_as(str(file_path))
 
         # find_rtdose_file MUST NOT return this beam dose as the plan-level dose!
-        plan_dose = find_rtdose_file(str(tmp_path), plan_uid="1.2.3.plan")
+        plan_dose = find_rtdose_file(str(tmp_path), plan_uid=ref_plan_uid)
         assert plan_dose is None
 
 
@@ -298,7 +300,7 @@ def test_dose_status_and_upload_endpoints():
     db = SessionLocal()
     uid_str = uuid.uuid4().hex[:8]
     p_id = f"P_DOSE_{uid_str}"
-    plan_uid = f"1.2.826.0.1.3680043.9.7243.{uid_str}"
+    plan_uid = generate_uid()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         patient = Patient(patient_id=p_id, patient_name="Dose Test")
@@ -332,7 +334,7 @@ def test_dose_status_and_upload_endpoints():
             dose_file_path = Path(upload_src_dir) / "source_dose.dcm"
             file_meta = FileMetaDataset()
             file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.481.2"
-            file_meta.MediaStorageSOPInstanceUID = "1.2.826.0.1.3680043.9.7243.rtdose.upload"
+            file_meta.MediaStorageSOPInstanceUID = generate_uid()
             file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
             ds = pydicom.dataset.FileDataset(str(dose_file_path), {}, file_meta=file_meta, preamble=b"\0" * 128)
