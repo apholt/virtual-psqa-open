@@ -544,13 +544,19 @@ export function PlanDetail() {
 
   const mcResults = results.filter((r) => r.comparison_type === "mcSquare_vs_TPS");
   const logResults = results.filter((r) => r.comparison_type === "log_vs_Rx" || r.comparison_type === "log_vs_TPS");
-  const mcComposite = mcResults.find((r) => r.field_name === "Composite" || r.beam_number === null) || mcResults[0];
+  const mcComposite = useMemo(() => {
+    const explicit = mcResults.find(
+      (r) => r.field_name === "Composite" || r.beam_number === null
+    );
+    if (explicit) return explicit;
+    if (mcResults.length === 1) return mcResults[0];
+    return undefined;
+  }, [mcResults]);
+
   const mcFieldResults = useMemo(() => {
-    return [...mcResults].sort((a, b) => {
-      if (a.beam_number == null && b.beam_number != null) return 1;
-      if (a.beam_number != null && b.beam_number == null) return -1;
-      return (a.beam_number ?? 0) - (b.beam_number ?? 0);
-    });
+    const hasPerBeam = mcResults.some((r) => r.beam_number != null);
+    const list = hasPerBeam ? mcResults.filter((r) => r.beam_number != null) : mcResults;
+    return [...list].sort((a, b) => (a.beam_number ?? 0) - (b.beam_number ?? 0));
   }, [mcResults]);
 
   return (
@@ -1053,8 +1059,8 @@ export function PlanDetail() {
                     </span>
                   </div>
                   <p className="text-[11px] text-clinical-muted mt-1">
-                    {mcResults.length > 0
-                      ? `${mcResults.filter((r) => r.passed).length} of ${mcResults.length} fields meet clinical tolerance.`
+                    {mcFieldResults.length > 0
+                      ? `${mcFieldResults.filter((r) => r.passed).length} of ${mcFieldResults.length} fields meet clinical tolerance.`
                       : "Secondary calculation pending. Click 'Run MC Simulation' above to calculate."}
                   </p>
                 </div>

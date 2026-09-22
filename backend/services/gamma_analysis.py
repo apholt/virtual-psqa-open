@@ -852,12 +852,68 @@ def run_gamma_analysis(
                     f"({'PASS' if passed else 'FAIL'})"
                 )
 
-            # All beams must pass for the composite to pass
-            all_passed = all(p for _, _, p in beam_results)
+            # Evaluate overall composite 3D gamma (summed MC vs summed/plan TPS)
+            comp_passed = True
+            comp_pr = 0.0
+            if spec.reference in doses and spec.evaluation in doses:
+                ref = doses[spec.reference]
+                ev = doses[spec.evaluation]
+                if ev.shape != ref.shape:
+                    ev = _resample_to(ev, ref)
+
+                ext = _external_mask(ref, plan.dicom_store_path)
+                if ext is not None:
+                    ref = DoseGrid(
+                        array=np.where(ext, ref.array, 0.0).astype(np.float32),
+                        spacing=ref.spacing, origin=ref.origin,
+                    )
+                    ev = DoseGrid(
+                        array=np.where(ext, ev.array, 0.0).astype(np.float32),
+                        spacing=ev.spacing, origin=ev.origin,
+                    )
+
+                comp_gamma_map, comp_pr, comp_z, comp_voxel_mm = _gamma_eval_3d(
+                    ref, ev, dd=spec.dd, dta=spec.dta,
+                )
+                comp_passed = comp_pr >= spec.threshold
+                comp_map_path = save_gamma_map(
+                    _gamma_map_path(plan_id, spec.name, fraction_number),
+                    comp_gamma_map, comp_z, comp_voxel_mm, comp_pr, spec.dd, spec.dta,
+                )
+
+                comp_row = GammaResult(
+                    plan_id=plan_id,
+                    fraction_number=fraction_number,
+                    field_name="Composite",
+                    beam_number=None,
+                    comparison_type=spec.name,
+                    dd_percent=spec.dd,
+                    dta_mm=spec.dta,
+                    passing_rate=round(comp_pr, 2),
+                    threshold=spec.threshold,
+                    passed=comp_passed,
+                    gamma_map_path=comp_map_path,
+                )
+                db.add(comp_row)
+                results_summary.append({
+                    "comparison_type": spec.name,
+                    "field_name": "Composite",
+                    "passing_rate": round(comp_pr, 2),
+                    "threshold": spec.threshold,
+                    "passed": comp_passed,
+                    "plane_index": comp_z,
+                })
+                logger.info(
+                    f"mcSquare_vs_TPS 3D composite: {comp_pr:.1f}% @ {spec.dd}%/{spec.dta}mm "
+                    f"({'PASS' if comp_passed else 'FAIL'})"
+                )
+
+            # All beams and composite must pass for the overall comparison to pass
+            all_passed = all(p for _, _, p in beam_results) and comp_passed
             mean_pr = np.mean([pr for _, pr, _ in beam_results]) if beam_results else 0.0
             passed_map[spec.name] = all_passed
             logger.info(
-                f"mcSquare_vs_TPS composite: mean={mean_pr:.1f}% "
+                f"mcSquare_vs_TPS overall: composite={comp_pr:.1f}%, beam_mean={mean_pr:.1f}% "
                 f"({'ALL PASS' if all_passed else 'SOME FAIL'})"
             )
 
@@ -931,7 +987,7 @@ def run_gamma_analysis(
 
     db.commit()
 
-    # GATE_VERDICT_V1 -- plan.qa_status is NOT written here. The gate reads
+    # NOTE: compute_verdict removed. The gate (services/gate.py) consumes
     # these rows and decides; see services/pipeline.py::_persist_gate.
 
     if job_id is not None:
@@ -943,6 +999,104 @@ def run_gamma_analysis(
                 f"{n_pass}/{len(passed_map)} comparison(s) passed")
     return {"passed_by_comparison": dict(passed_map),
             "results": results_summary}
+
+
+def ensure_composite_gamma(plan_id: int, db: Session) -> Optional[GammaResult]:
+    """
+    Ensures that a 3D composite GammaResult (field_name='Composite', beam_number=None)
+    exists for mcSquare_vs_TPS pre-treatment QA. If per-beam results exist but the
+    composite evaluation was never written, computes and persists it on the fly.
+    """
+    plan = db.query(Plan).filter_by(id=plan_id).first()
+    if plan is None:
+        return None
+
+    # Check if composite already exists
+    existing = (
+        db.query(GammaResult)
+        .filter(
+            GammaResult.plan_id == plan_id,
+            GammaResult.comparison_type == "mcSquare_vs_TPS",
+            GammaResult.fraction_number.is_(None),
+            (GammaResult.field_name == "Composite") | (GammaResult.beam_number.is_(None)),
+        )
+        .first()
+    )
+    if existing:
+        return existing
+
+    # Check if we have mcSquare_vs_TPS per-beam results
+    beam_results = (
+        db.query(GammaResult)
+        .filter(
+            GammaResult.plan_id == plan_id,
+            GammaResult.comparison_type == "mcSquare_vs_TPS",
+            GammaResult.fraction_number.is_(None),
+            GammaResult.beam_number.isnot(None),
+        )
+        .all()
+    )
+    if not beam_results:
+        return None
+
+    try:
+        doses = load_plan_doses(plan_id, db)
+        if "tps" not in doses or "mcSquare" not in doses:
+            return None
+
+        spec = next((s for s in _comparison_specs() if s.name == "mcSquare_vs_TPS"), None)
+        if not spec:
+            return None
+
+        ref = doses["tps"]
+        ev = doses["mcSquare"]
+        if ev.shape != ref.shape:
+            ev = _resample_to(ev, ref)
+
+        ext = _external_mask(ref, plan.dicom_store_path)
+        if ext is not None:
+            ref = DoseGrid(
+                array=np.where(ext, ref.array, 0.0).astype(np.float32),
+                spacing=ref.spacing, origin=ref.origin,
+            )
+            ev = DoseGrid(
+                array=np.where(ext, ev.array, 0.0).astype(np.float32),
+                spacing=ev.spacing, origin=ev.origin,
+            )
+
+        comp_gamma_map, comp_pr, comp_z, comp_voxel_mm = _gamma_eval_3d(
+            ref, ev, dd=spec.dd, dta=spec.dta,
+        )
+        comp_passed = comp_pr >= spec.threshold
+        comp_map_path = save_gamma_map(
+            _gamma_map_path(plan_id, spec.name, None),
+            comp_gamma_map, comp_z, comp_voxel_mm, comp_pr, spec.dd, spec.dta,
+        )
+
+        comp_row = GammaResult(
+            plan_id=plan_id,
+            fraction_number=None,
+            field_name="Composite",
+            beam_number=None,
+            comparison_type=spec.name,
+            dd_percent=spec.dd,
+            dta_mm=spec.dta,
+            passing_rate=round(comp_pr, 2),
+            threshold=spec.threshold,
+            passed=comp_passed,
+            gamma_map_path=comp_map_path,
+        )
+        db.add(comp_row)
+        db.commit()
+        db.refresh(comp_row)
+        logger.info(
+            f"Plan {plan_id}: Auto-computed and persisted missing 3D composite gamma: {comp_pr:.1f}%"
+        )
+        return comp_row
+    except Exception as exc:
+        logger.warning(f"Plan {plan_id}: ensure_composite_gamma failed: {exc}")
+        return None
+
 
 
 def check_plan_dose_status(plan_id: int, db: Session) -> dict:

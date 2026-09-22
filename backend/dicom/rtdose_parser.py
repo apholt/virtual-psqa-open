@@ -154,6 +154,14 @@ def find_beam_rtdose_files(
             except Exception:
                 pass
 
+            if beam_num is None:
+                try:
+                    ref_beams = getattr(dcm, "ReferencedBeamSequence", None)
+                    if ref_beams and len(ref_beams) > 0:
+                        beam_num = int(ref_beams[0].ReferencedBeamNumber)
+                except Exception:
+                    pass
+
             if beam_num is not None:
                 if valid_set is not None and beam_num not in valid_set:
                     logger.debug(
