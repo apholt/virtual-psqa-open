@@ -537,6 +537,13 @@ export function PlanDetail() {
   const mcResults = results.filter((r) => r.comparison_type === "mcSquare_vs_TPS");
   const logResults = results.filter((r) => r.comparison_type === "log_vs_Rx" || r.comparison_type === "log_vs_TPS");
   const mcComposite = mcResults.find((r) => r.field_name === "Composite" || r.beam_number === null) || mcResults[0];
+  const mcFieldResults = useMemo(() => {
+    return [...mcResults].sort((a, b) => {
+      if (a.beam_number == null && b.beam_number != null) return 1;
+      if (a.beam_number != null && b.beam_number == null) return -1;
+      return (a.beam_number ?? 0) - (b.beam_number ?? 0);
+    });
+  }, [mcResults]);
 
   return (
     <div className="min-h-screen bg-clinical-bg">
@@ -1228,7 +1235,7 @@ export function PlanDetail() {
                     <tr className="border-b border-clinical-border text-clinical-muted uppercase text-[10px]">
                       <th className="py-2 px-3">Beam #</th>
                       <th className="py-2 px-3">Comparison</th>
-                      <th className="py-2 px-3">Field / Fraction</th>
+                      <th className="py-2 px-3">Field Name</th>
                       <th className="py-2 px-3">Criteria (DD / DTA)</th>
                       <th className="py-2 px-3">Pass Threshold</th>
                       <th className="py-2 px-3">Passing Rate</th>
@@ -1236,22 +1243,20 @@ export function PlanDetail() {
                     </tr>
                   </thead>
                   <tbody>
-                    {results.length === 0 ? (
+                    {mcFieldResults.length === 0 ? (
                       <tr>
                         <td colSpan={7} className="py-4 text-center text-clinical-muted">
-                          No gamma evaluations recorded yet.
+                          No openMCsquare gamma evaluations recorded yet.
                         </td>
                       </tr>
                     ) : (
-                      results.map((r) => (
+                      mcFieldResults.map((r) => (
                         <tr key={r.id} className="border-b border-clinical-border/40 hover:bg-clinical-bg/40">
                           <td className="py-2 px-3 font-mono">{r.beam_number ?? "—"}</td>
                           <td className="py-2 px-3 font-medium text-clinical-text">
                             {COMPARISON_LABELS[r.comparison_type as ComparisonType] || r.comparison_type}
                           </td>
-                          <td className="py-2 px-3 font-mono">
-                            {r.field_name} {r.fraction_number ? `(Fx ${r.fraction_number})` : ""}
-                          </td>
+                          <td className="py-2 px-3 font-mono">{r.field_name}</td>
                           <td className="py-2 px-3 text-clinical-muted font-mono">
                             {r.dd_percent}% / {r.dta_mm}mm
                           </td>
