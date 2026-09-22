@@ -175,6 +175,7 @@ def _beam_names_from_plan(dicom_store_path: str, plan_uid: Optional[str] = None)
 
 
 _EXTERNAL_MASK_CACHE: dict = {}
+_EXTERNAL_MASK_CACHE_MAX = 32
 
 
 def _external_mask(target: DoseGrid, dicom_store_path: str) -> Optional[np.ndarray]:
@@ -184,11 +185,18 @@ def _external_mask(target: DoseGrid, dicom_store_path: str) -> Optional[np.ndarr
     couch and in open air where MCsquare's Dose_Segmentation zeroes it, so
     scoring those regions structurally fails the comparison without any
     clinical meaning. Returns a bool array (True inside External) or None if no
-    External ROI is found. Cached per (store, grid geometry).
+    External ROI is found. Cached per (store, store mtime, grid geometry).
     """
     from PIL import Image as _PILImage, ImageDraw as _PILDraw
 
-    key = (dicom_store_path, target.shape, tuple(target.spacing), tuple(target.origin))
+    try:
+        store_mtime = Path(dicom_store_path).stat().st_mtime_ns
+    except OSError:
+        store_mtime = 0
+    key = (
+        str(dicom_store_path), store_mtime,
+        target.shape, tuple(target.spacing), tuple(target.origin),
+    )
     if key in _EXTERNAL_MASK_CACHE:
         return _EXTERNAL_MASK_CACHE[key]
 
@@ -202,29 +210,48 @@ def _external_mask(target: DoseGrid, dicom_store_path: str) -> Optional[np.ndarr
             rtstruct = str(path)
             break
     if rtstruct is None:
+        if len(_EXTERNAL_MASK_CACHE) >= _EXTERNAL_MASK_CACHE_MAX:
+            _EXTERNAL_MASK_CACHE.pop(next(iter(_EXTERNAL_MASK_CACHE)))
         _EXTERNAL_MASK_CACHE[key] = None
         return None
 
     dcm = pydicom.dcmread(rtstruct, force=True)
     names = {s.ROINumber: str(s.ROIName) for s in getattr(dcm, "StructureSetROISequence", [])}
-    ext_number = None
-    # prefer interpreted type EXTERNAL, fall back to name match
+
+    candidate_numbers: list[int] = []
+    # 1. Prefer interpreted type EXTERNAL from RTROIObservationsSequence
     for obs in getattr(dcm, "RTROIObservationsSequence", []):
         if str(getattr(obs, "RTROIInterpretedType", "")).upper() == "EXTERNAL":
-            ext_number = obs.ReferencedROINumber
-            break
-    if ext_number is None:
-        for num, nm in names.items():
-            if nm.strip().lower() == "external":
-                ext_number = num
-                break
-    if ext_number is None:
-        _EXTERNAL_MASK_CACHE[key] = None
-        return None
+            ref_num = getattr(obs, "ReferencedROINumber", None)
+            if ref_num is not None and ref_num not in candidate_numbers:
+                candidate_numbers.append(ref_num)
 
-    rc = next((r for r in getattr(dcm, "ROIContourSequence", [])
-               if getattr(r, "ReferencedROINumber", None) == ext_number), None)
-    if rc is None or not hasattr(rc, "ContourSequence"):
+    # 2. Exact match against common body contour names
+    for pref in ("external", "body", "patient", "skin_surface", "skin"):
+        for num, nm in names.items():
+            if nm.strip().lower() == pref and num not in candidate_numbers:
+                candidate_numbers.append(num)
+
+    # 3. Fallback to substring matching
+    for num, nm in names.items():
+        clean = nm.strip().lower()
+        if any(k in clean for k in ("external", "body", "patient")) and num not in candidate_numbers:
+            candidate_numbers.append(num)
+
+    rc = None
+    roi_contours = {
+        getattr(r, "ReferencedROINumber", None): r
+        for r in getattr(dcm, "ROIContourSequence", [])
+    }
+    for cand in candidate_numbers:
+        r = roi_contours.get(cand)
+        if r is not None and getattr(r, "ContourSequence", None):
+            rc = r
+            break
+
+    if rc is None:
+        if len(_EXTERNAL_MASK_CACHE) >= _EXTERNAL_MASK_CACHE_MAX:
+            _EXTERNAL_MASK_CACHE.pop(next(iter(_EXTERNAL_MASK_CACHE)))
         _EXTERNAL_MASK_CACHE[key] = None
         return None
 
@@ -248,6 +275,14 @@ def _external_mask(target: DoseGrid, dicom_store_path: str) -> Optional[np.ndarr
         _PILDraw.Draw(img).polygon(xy, outline=1, fill=1)
         mask[zi] |= np.array(img, dtype=bool)
 
+    if mask.any():
+        from scipy.ndimage import binary_fill_holes
+        for z in range(nzv):
+            if mask[z].any():
+                mask[z] = binary_fill_holes(mask[z])
+
+    if len(_EXTERNAL_MASK_CACHE) >= _EXTERNAL_MASK_CACHE_MAX:
+        _EXTERNAL_MASK_CACHE.pop(next(iter(_EXTERNAL_MASK_CACHE)))
     _EXTERNAL_MASK_CACHE[key] = mask if mask.any() else None
     return _EXTERNAL_MASK_CACHE[key]
 
@@ -297,7 +332,12 @@ _RESAMPLE_CACHE: dict = {}
 _RESAMPLE_CACHE_MAX = 24
 
 
-def _resample_cached(src_path: str, src: DoseGrid, target: DoseGrid) -> DoseGrid:
+def _resample_cached(
+    src_path: str,
+    src: DoseGrid,
+    target: DoseGrid,
+    ext_mask: Optional[np.ndarray] = None,
+) -> DoseGrid:
     try:
         mtime = Path(src_path).stat().st_mtime_ns
     except OSError:
@@ -305,11 +345,18 @@ def _resample_cached(src_path: str, src: DoseGrid, target: DoseGrid) -> DoseGrid
     key = (
         str(src_path), mtime,
         target.shape, tuple(target.spacing), tuple(target.origin),
+        ext_mask is not None,
     )
     hit = _RESAMPLE_CACHE.get(key)
     if hit is not None:
         return hit
     out = _resample_to(src, target)
+    if ext_mask is not None:
+        out = DoseGrid(
+            array=np.where(ext_mask, out.array, 0.0).astype(np.float32),
+            spacing=out.spacing,
+            origin=out.origin,
+        )
     if len(_RESAMPLE_CACHE) >= _RESAMPLE_CACHE_MAX:
         _RESAMPLE_CACHE.pop(next(iter(_RESAMPLE_CACHE)))
     _RESAMPLE_CACHE[key] = out
@@ -382,17 +429,27 @@ def load_plan_doses(plan_id: int, db: Session) -> dict[str, DoseGrid]:
     # --- Conform CT-grid MCsquare doses onto the matching TPS grid ---
     # The gamma engine requires identical shapes; the worker emits MC dose on the
     # CT grid while the TPS RTDose is a different, cropped grid. Resample MC->TPS.
+    # Mask MCsquare dose to the external patient contour so it matches the TPS
+    # reference dose display and zeroes couch/air scatter outside the body.
     # Uses the resample cache: this function runs per viewer request, and
     # uncached resampling of CT-grid volumes is what made the UI lag.
+    ext_tps = _external_mask(doses["tps"], plan.dicom_store_path) if "tps" in doses else None
     if "tps" in doses and "mcSquare" in doses:
-        doses["mcSquare"] = _resample_cached(mc_path, doses["mcSquare"], doses["tps"])
+        doses["mcSquare"] = _resample_cached(
+            mc_path, doses["mcSquare"], doses["tps"], ext_mask=ext_tps
+        )
     for key in [k for k in doses if k.startswith("mcSquare_beam")]:
         beam_num = key.rsplit("beam", 1)[1]
         tps_key = f"tps_beam{beam_num}"
         target = doses.get(tps_key) or doses.get("tps")
         if target is not None:
+            ext_target = (
+                ext_tps
+                if target is doses.get("tps")
+                else _external_mask(target, plan.dicom_store_path)
+            )
             doses[key] = _resample_cached(
-                mc_beam_paths.get(key, key), doses[key], target
+                mc_beam_paths.get(key, key), doses[key], target, ext_mask=ext_target
             )
 
     return doses
@@ -701,6 +758,11 @@ def run_gamma_analysis(
                 # MC beam dose is on the CT grid -- conform it to this beam's TPS
                 # grid so shapes match and the z index refers to the same plane.
                 mc_beam = _resample_to(beam_mc_doses[beam_num], tps_beam)
+                if ext is not None:
+                    mc_beam = DoseGrid(
+                        array=np.where(ext, mc_beam.array, 0.0).astype(np.float32),
+                        spacing=mc_beam.spacing, origin=mc_beam.origin,
+                    )
                 field_name = beam_names.get(beam_num, f"Beam {beam_num}")
 
                 # Volumetric gamma -- a single axial plane is unrepresentative
@@ -771,6 +833,10 @@ def run_gamma_analysis(
                     ref = DoseGrid(
                         array=np.where(ext, ref.array, 0.0).astype(np.float32),
                         spacing=ref.spacing, origin=ref.origin,
+                    )
+                    ev = DoseGrid(
+                        array=np.where(ext, ev.array, 0.0).astype(np.float32),
+                        spacing=ev.spacing, origin=ev.origin,
                     )
                 # Volumetric gamma for the summed MC-vs-TPS fallback too.
                 gamma_map, passing_rate, z, voxel_mm = _gamma_eval_3d(
