@@ -28,8 +28,13 @@ _SOURCE_LABELS = {"tps": "TPS", "mcSquare": "MCsquare", "log": "Log recon"}
 
 
 @router.get("/plan/{plan_id}", response_model=list[GammaResultResponse])
-def get_plan_results(plan_id: int, db: Session = Depends(get_db)):
-    """Returns all stored gamma results for a plan."""
+async def get_plan_results(plan_id: int, db: Session = Depends(get_db)):
+    """Returns all stored gamma results for a plan, auto-generating composite if missing."""
+    try:
+        from services.gamma_analysis import ensure_composite_gamma
+        ensure_composite_gamma(plan_id, db)
+    except Exception:
+        pass
     return (
         db.query(GammaResult)
         .filter_by(plan_id=plan_id)
@@ -39,7 +44,7 @@ def get_plan_results(plan_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/plan/{plan_id}/doses", response_model=PlanDoseInfo)
-def get_plan_dose_info(plan_id: int, db: Session = Depends(get_db)):
+async def get_plan_dose_info(plan_id: int, db: Session = Depends(get_db)):
     """Returns metadata for all available dose sources + available comparisons."""
     plan = db.query(Plan).filter_by(id=plan_id).first()
     if plan is None:
@@ -76,7 +81,7 @@ def get_plan_dose_info(plan_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/plan/{plan_id}/dose/{source}/plane/{z}")
-def get_dose_plane(
+async def get_dose_plane(
     plan_id: int, source: str, z: int, db: Session = Depends(get_db)
 ):
     """Returns a 2D dose plane as a little-endian float32 binary buffer (Gy)."""
@@ -102,7 +107,7 @@ def get_dose_plane(
 
 
 @router.get("/plan/{plan_id}/ct/plane/{z}")
-def get_ct_plane(plan_id: int, z: int, db: Session = Depends(get_db)):
+async def get_ct_plane(plan_id: int, z: int, db: Session = Depends(get_db)):
     """
     Planning-CT plane resampled onto the TPS dose grid, as float32 HU.
     Same grid/indexing as the dose planes, so the frontend can composite the
@@ -132,7 +137,7 @@ def get_ct_plane(plan_id: int, z: int, db: Session = Depends(get_db)):
 
 
 @router.get("/plan/{plan_id}/spot-stats")
-def get_spot_stats(plan_id: int, db: Session = Depends(get_db)):
+async def get_spot_stats(plan_id: int, db: Session = Depends(get_db)):
     """
     Delivered spot statistics per analysed fraction, from the JSON files the
     log reconstructor writes (spot_stats_fx{N}.json). Returns a list ordered
@@ -155,7 +160,7 @@ def get_spot_stats(plan_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/plan/{plan_id}/gamma/{comparison}/plane/{z}")
-def get_gamma_plane(
+async def get_gamma_plane(
     plan_id: int, comparison: str, z: int, db: Session = Depends(get_db)
 ):
     """
@@ -183,14 +188,14 @@ def get_gamma_plane(
 
 
 @router.get("/plan/{plan_id}/fraction-logs")
-def get_plan_fraction_logs(plan_id: int, db: Session = Depends(get_db)):
+async def get_plan_fraction_logs(plan_id: int, db: Session = Depends(get_db)):
     """Returns summary metadata for all analyzed fractions of a plan."""
     from services.fraction_log_analysis import list_plan_fraction_logs
     return list_plan_fraction_logs(plan_id, db)
 
 
 @router.get("/plan/{plan_id}/fraction-log/{fraction_number}")
-def get_plan_fraction_log(
+async def get_plan_fraction_log(
     plan_id: int, fraction_number: int, db: Session = Depends(get_db)
 ):
     """
@@ -208,7 +213,7 @@ def get_plan_fraction_log(
 
 
 @router.get("/plan/{plan_id}/couch-trends")
-def get_plan_couch_trends(plan_id: int, db: Session = Depends(get_db)):
+async def get_plan_couch_trends(plan_id: int, db: Session = Depends(get_db)):
     """
     Returns 6-DoF couch position and angle tracking across all delivered fractions.
     Supports beam-by-beam selection, inter-fraction drift (delta from Fx 1), and tolerance thresholds.
@@ -218,7 +223,7 @@ def get_plan_couch_trends(plan_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/plan/{plan_id}/dvh", response_model=PlanDVHResponse)
-def get_plan_dvh(
+async def get_plan_dvh(
     plan_id: int,
     setup_uncertainty_mm: float = 3.0,
     range_uncertainty_pct: float = 3.0,
@@ -246,7 +251,7 @@ def get_plan_dvh(
 
 
 @router.post("/plan/{plan_id}/dvh/calculate", response_model=PlanDVHResponse)
-def calculate_plan_dvh_endpoint(
+async def calculate_plan_dvh(
     plan_id: int,
     req: CalculateDVHRequest,
     db: Session = Depends(get_db),

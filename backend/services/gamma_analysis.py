@@ -176,7 +176,6 @@ def _beam_names_from_plan(dicom_store_path: str, plan_uid: Optional[str] = None)
 
 _EXTERNAL_MASK_CACHE: dict = {}
 _EXTERNAL_MASK_CACHE_MAX = 32
-_RTSTRUCT_PATH_CACHE: dict[tuple[str, int], Optional[str]] = {}
 
 
 def _external_mask(target: DoseGrid, dicom_store_path: str) -> Optional[np.ndarray]:
@@ -201,21 +200,15 @@ def _external_mask(target: DoseGrid, dicom_store_path: str) -> Optional[np.ndarr
     if key in _EXTERNAL_MASK_CACHE:
         return _EXTERNAL_MASK_CACHE[key]
 
-    rt_key = (str(dicom_store_path), store_mtime)
-    if rt_key in _RTSTRUCT_PATH_CACHE:
-        rtstruct = _RTSTRUCT_PATH_CACHE[rt_key]
-    else:
-        rtstruct = None
-        for path in Path(dicom_store_path).rglob("*.dcm"):
-            try:
-                d = pydicom.dcmread(str(path), stop_before_pixels=True, force=True)
-            except Exception:
-                continue
-            if str(getattr(d, "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.481.3":
-                rtstruct = str(path)
-                break
-        _RTSTRUCT_PATH_CACHE[rt_key] = rtstruct
-
+    rtstruct = None
+    for path in Path(dicom_store_path).rglob("*.dcm"):
+        try:
+            d = pydicom.dcmread(str(path), stop_before_pixels=True, force=True)
+        except Exception:
+            continue
+        if str(getattr(d, "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.481.3":
+            rtstruct = str(path)
+            break
     if rtstruct is None:
         if len(_EXTERNAL_MASK_CACHE) >= _EXTERNAL_MASK_CACHE_MAX:
             _EXTERNAL_MASK_CACHE.pop(next(iter(_EXTERNAL_MASK_CACHE)))
@@ -396,7 +389,6 @@ def clear_dose_caches() -> None:
     """Flushes scan, mask, and resample caches (e.g. after uploading new dose files)."""
     _STORE_SCAN_CACHE.clear()
     _EXTERNAL_MASK_CACHE.clear()
-    _RTSTRUCT_PATH_CACHE.clear()
     _RESAMPLE_CACHE.clear()
 
 
@@ -612,7 +604,7 @@ def _gamma_eval_3d(
     target_mm = float(getattr(settings, "GAMMA_EVAL_VOXEL_MM", 1.0))
     zoom_f = [s / target_mm for s in spacing]
     est_voxels = ref_c.size * float(np.prod(zoom_f))
-    VOXEL_CAP = 1_500_000  # keep the 3D search tractable in pure numpy
+    VOXEL_CAP = 8_000_000  # keep the 3D search tractable in pure numpy
     if est_voxels > VOXEL_CAP:
         scale = (VOXEL_CAP / est_voxels) ** (1.0 / 3.0)
         zoom_f = [max(1.0, f * scale) for f in zoom_f]

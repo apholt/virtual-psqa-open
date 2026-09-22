@@ -201,7 +201,7 @@ async def get_plan(plan_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{plan_id}/dose-status")
-def get_plan_dose_status_endpoint(plan_id: int, db: Session = Depends(get_db)):
+async def get_plan_dose_status_endpoint(plan_id: int, db: Session = Depends(get_db)):
     """Returns detailed status of TPS RTDOSE files (plan-level & per-beam) for the plan."""
     from services.gamma_analysis import check_plan_dose_status
     try:
