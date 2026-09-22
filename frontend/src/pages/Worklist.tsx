@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
-import { Upload, RefreshCw, Search, Filter } from "lucide-react";
+import { Upload, RefreshCw, Search, Filter, Trash2 } from "lucide-react";
 import { getPatients } from "../api/client";
 import type { PatientWithLatestPlan, QAStatus } from "../types";
 import { StatusBadge } from "../components/StatusBadge";
 import { UploadModal } from "../components/UploadModal";
+import { DeletePatientModal } from "../components/DeletePatientModal";
 import { Topbar } from "../components/Topbar";
 
 const STATUS_OPTIONS: { value: string; label: string }[] = [
@@ -29,6 +30,7 @@ export function Worklist() {
   const [statusFilter, setStatusFilter] = useState("");
   const [siteFilter, setSiteFilter] = useState("");
   const [showUpload, setShowUpload] = useState(false);
+  const [patientToDelete, setPatientToDelete] = useState<PatientWithLatestPlan | null>(null);
   const esRef = useRef<EventSource | null>(null);
 
   const fetchPatients = useCallback(async () => {
@@ -199,9 +201,21 @@ export function Worklist() {
                         : `${p.days_since_created}d ago`}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <span className="text-clinical-accent text-xs hover:underline">
-                        View →
-                      </span>
+                      <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => handleRowClick(p)}
+                          className="text-clinical-accent text-xs hover:underline cursor-pointer"
+                        >
+                          View →
+                        </button>
+                        <button
+                          onClick={() => setPatientToDelete(p)}
+                          className="p-1 text-clinical-muted hover:text-red-500 rounded transition-colors cursor-pointer"
+                          title="Delete patient and all plans"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -219,6 +233,17 @@ export function Worklist() {
             toast.success(`Plan ingested: ${result.plan_label}`);
             fetchPatients();
             navigate(`/plans/${result.plan_id}`);
+          }}
+        />
+      )}
+
+      {patientToDelete && (
+        <DeletePatientModal
+          patient={patientToDelete}
+          onClose={() => setPatientToDelete(null)}
+          onSuccess={() => {
+            setPatientToDelete(null);
+            fetchPatients();
           }}
         />
       )}

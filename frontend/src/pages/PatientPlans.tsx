@@ -1,15 +1,18 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { Trash2 } from "lucide-react";
 import { getPatientPlans } from "../api/client";
 import type { PlanSummary, QAStatus } from "../types";
 import { StatusBadge } from "../components/StatusBadge";
 import { Topbar } from "../components/Topbar";
+import { DeletePatientModal } from "../components/DeletePatientModal";
 
 export function PatientPlans() {
   const { patientId } = useParams<{ patientId: string }>();
   const navigate = useNavigate();
   const [plans, setPlans] = useState<PlanSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
 
   useEffect(() => {
     if (!patientId) return;
@@ -29,6 +32,26 @@ export function PatientPlans() {
       />
 
       <div className="max-w-5xl mx-auto px-4 py-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h1 className="text-lg font-bold text-clinical-text">
+              Patient Plans {plans[0]?.patient_identifier ? `(${plans[0].patient_identifier})` : ""}
+            </h1>
+            <p className="text-xs text-clinical-muted mt-0.5">
+              {plans.length} plan{plans.length !== 1 ? "s" : ""} registered for this patient
+            </p>
+          </div>
+          {plans.length > 0 && (
+            <button
+              onClick={() => setShowDeleteModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-md transition-colors cursor-pointer"
+              title="Delete patient and all plans"
+            >
+              <Trash2 size={13} />
+              Delete Patient Data
+            </button>
+          )}
+        </div>
         {loading ? (
           <p className="text-clinical-muted text-sm">Loading…</p>
         ) : plans.length === 0 ? (
@@ -66,6 +89,22 @@ export function PatientPlans() {
           </div>
         )}
       </div>
+
+      {showDeleteModal && patientId && (
+        <DeletePatientModal
+          patient={{
+            id: parseInt(patientId, 10),
+            patient_id: plans[0]?.patient_identifier || `Patient #${patientId}`,
+            patient_name: plans[0]?.patient_name || undefined,
+            plan_count: plans.length,
+          }}
+          onClose={() => setShowDeleteModal(false)}
+          onSuccess={() => {
+            setShowDeleteModal(false);
+            navigate("/");
+          }}
+        />
+      )}
     </div>
   );
 }

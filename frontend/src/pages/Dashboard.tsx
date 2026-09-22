@@ -23,6 +23,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { UploadModal } from "../components/UploadModal";
 import { UploadRecordModal } from "../components/UploadRecordModal";
 import { OrthancImportModal } from "../components/OrthancImportModal";
+import { DeletePatientModal } from "../components/DeletePatientModal";
 import { C, gateStyle, btnStyle } from "../theme";
 
 type GateActionRow = ActionRow & {
@@ -183,6 +184,7 @@ export function Dashboard() {
   const [showUpload, setShowUpload] = useState(false);
   const [showRecordUpload, setShowRecordUpload] = useState(false);
   const [showOrthanc, setShowOrthanc] = useState(false);
+  const [patientToDelete, setPatientToDelete] = useState<PatientWithLatestPlan | null>(null);
 
   const togglePatientExpand = useCallback((patientId: number, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -928,18 +930,43 @@ export function Dashboard() {
                             {p.days_since_created === 0 ? "Today" : `${p.days_since_created}d ago`}
                           </td>
                           <td style={{ padding: "8px 0", textAlign: "right" }}>
-                            <span
-                              style={{
-                                display: "inline-flex",
-                                alignItems: "center",
-                                gap: 4,
-                                fontSize: 11.5,
-                                color: "#3b82f6",
-                                fontWeight: 500,
-                              }}
-                            >
-                              {isMultiPlan ? "All plans" : "View"} <ArrowRight size={12} />
-                            </span>
+                            <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                              <span
+                                style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: 4,
+                                  fontSize: 11.5,
+                                  color: "#3b82f6",
+                                  fontWeight: 500,
+                                }}
+                              >
+                                {isMultiPlan ? "All plans" : "View"} <ArrowRight size={12} />
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPatientToDelete(p);
+                                }}
+                                style={{
+                                  background: "transparent",
+                                  border: "none",
+                                  cursor: "pointer",
+                                  padding: "2px 4px",
+                                  borderRadius: 4,
+                                  color: C.muted,
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                }}
+                                title="Delete patient and all plans"
+                                onMouseEnter={(e) => (e.currentTarget.style.color = C.barFail)}
+                                onMouseLeave={(e) => (e.currentTarget.style.color = C.muted)}
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                         {isMultiPlan && isExpanded && p.plans?.map((sub) => (
@@ -1044,6 +1071,18 @@ export function Dashboard() {
           onPlanImported={(result) => {
             refreshAll();
             navigate(`/plans/${result.plan_id}`);
+          }}
+        />
+      )}
+
+      {/* Delete Patient Modal */}
+      {patientToDelete && (
+        <DeletePatientModal
+          patient={patientToDelete}
+          onClose={() => setPatientToDelete(null)}
+          onSuccess={() => {
+            setPatientToDelete(null);
+            refreshAll();
           }}
         />
       )}

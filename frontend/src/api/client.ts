@@ -66,6 +66,18 @@ export const getPatients = (params?: {
 export const getPatientPlans = (patientId: number) =>
   api.get<PlanSummary[]>(`/patients/${patientId}/plans`).then((r) => r.data);
 
+export const deletePatient = (patientId: number | string) =>
+  api
+    .delete<{
+      success: boolean;
+      patient_id: string;
+      patient_name: string;
+      plans_deleted: number;
+      beam_deliveries_retained?: number;
+      message: string;
+    }>(`/patients/${patientId}`)
+    .then((r) => r.data);
+
 // Plans
 export const uploadDicom = (files: File[]) => {
   const form = new FormData();
