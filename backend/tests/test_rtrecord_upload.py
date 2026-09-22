@@ -5,6 +5,7 @@ import pytest
 import pydicom
 from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.sequence import Sequence
+from pydicom.uid import generate_uid
 from fastapi.testclient import TestClient
 
 from database import SessionLocal, ensure_schema
@@ -25,7 +26,7 @@ def _make_dummy_plan(patient_id="PT_UPLOAD_TEST", plan_uid=None):
     plan = Dataset()
     plan.Modality = "RTPLAN"
     plan.SOPClassUID = "1.2.840.10008.5.1.4.1.1.481.8"
-    plan.SOPInstanceUID = plan_uid or f"1.2.826.0.1.3680043.9.7243.{uuid.uuid4().hex[:8]}.plan"
+    plan.SOPInstanceUID = plan_uid or generate_uid()
     plan.PatientID = patient_id
     plan.PatientName = "Upload^Test"
     plan.RTPlanLabel = "PLAN_UPLOAD_TEST"
@@ -60,7 +61,7 @@ def _make_dummy_record(
     rec = Dataset()
     rec.Modality = modality
     rec.SOPClassUID = sop_class_uid
-    rec.SOPInstanceUID = f"1.2.826.0.1.3680043.9.7243.{uuid.uuid4().hex[:8]}.rec"
+    rec.SOPInstanceUID = generate_uid()
     rec.PatientID = patient_id
     rec.TreatmentDate = "20260921"
     rec.TreatmentTime = "100000"
@@ -226,7 +227,7 @@ def test_upload_rtrecord_without_plan_creates_provisional_plan(tmp_path):
     try:
         rand = uuid.uuid4().hex[:8]
         pid = f"PT_NOPLAN_{rand}"
-        planned_plan_uid = f"1.2.826.0.1.3680043.9.7243.{rand}.plan"
+        planned_plan_uid = generate_uid()
 
         # Record referencing a plan that does not exist in the database yet
         rec_dcm = _make_dummy_record(patient_id=pid, plan_uid=planned_plan_uid, fraction_number=1)
@@ -282,7 +283,7 @@ def test_upload_accompanied_rtplan_and_rtrecord(tmp_path):
     try:
         rand = uuid.uuid4().hex[:8]
         pid = f"PT_COMBO_{rand}"
-        plan_uid = f"1.2.826.0.1.3680043.9.7243.{rand}.combo_plan"
+        plan_uid = generate_uid()
 
         plan_dcm = _make_dummy_plan(patient_id=pid, plan_uid=plan_uid)
         rec_dcm = _make_dummy_record(patient_id=pid, plan_uid=plan_uid, fraction_number=1)
@@ -321,7 +322,7 @@ def test_upload_proton_rtionrecord_sop_class_481_9_and_modality_rtibtr(tmp_path)
     try:
         rand = uuid.uuid4().hex[:8]
         pid = f"PT_PROTON_{rand}"
-        plan_uid = f"1.2.826.0.1.3680043.9.7243.{rand}.proton_plan"
+        plan_uid = generate_uid()
 
         plan_dcm = _make_dummy_plan(patient_id=pid, plan_uid=plan_uid)
         plan_bytes = _dataset_to_bytes(plan_dcm)
@@ -368,7 +369,7 @@ def test_upload_extensionless_and_raw_uid_rtrecord(tmp_path):
     try:
         rand = uuid.uuid4().hex[:8]
         pid = f"PT_RAW_{rand}"
-        plan_uid = f"1.2.826.0.1.3680043.9.7243.{rand}.raw_plan"
+        plan_uid = generate_uid()
 
         plan_dcm = _make_dummy_plan(patient_id=pid, plan_uid=plan_uid)
         plan_bytes = _dataset_to_bytes(plan_dcm)
@@ -413,7 +414,7 @@ def test_upload_rtrecord_fraction_number_from_fraction_group_sequence(tmp_path):
     try:
         rand = uuid.uuid4().hex[:8]
         pid = f"PT_FXSEQ_{rand}"
-        plan_uid = f"1.2.826.0.1.3680043.9.7243.{rand}.seq_plan"
+        plan_uid = generate_uid()
 
         plan_dcm = _make_dummy_plan(patient_id=pid, plan_uid=plan_uid)
         plan_bytes = _dataset_to_bytes(plan_dcm)
@@ -476,7 +477,7 @@ def test_upload_zip_with_multiple_records(tmp_path):
     try:
         rand = uuid.uuid4().hex[:8]
         pid = f"PT_ZIP_{rand}"
-        plan_uid = f"1.2.826.0.1.3680043.9.7243.{rand}.zip_plan"
+        plan_uid = generate_uid()
 
         plan_dcm = _make_dummy_plan(patient_id=pid, plan_uid=plan_uid)
         rec2 = _make_dummy_record(patient_id=pid, plan_uid=plan_uid, fraction_number=2, sop_class_uid="1.2.840.10008.5.1.4.1.1.481.9")

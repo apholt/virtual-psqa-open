@@ -26,6 +26,7 @@ import {
   Square,
   RotateCcw,
   UploadCloud,
+  Info,
 } from "lucide-react";
 import {
   getPlan,
@@ -43,6 +44,7 @@ import {
   secondaryDoseReportUrl,
   reportUrl,
   getChartChecks,
+  getPlanDoseStatus,
 } from "../api/client";
 import type {
   PlanSummary,
@@ -56,6 +58,7 @@ import type {
   TrendPoint,
   QAJobResponse,
   FractionLogSummary,
+  PlanDoseStatus,
 } from "../types";
 import { NavBar } from "../components/NavBar";
 import { DoseMapCanvas } from "../components/DoseMapCanvas";
@@ -69,6 +72,7 @@ import { SyntheticCTViewer } from "../components/SyntheticCTViewer";
 import { OIRViewer } from "../components/OIRViewer";
 import { OrthancImportModal } from "../components/OrthancImportModal";
 import { UploadRecordModal } from "../components/UploadRecordModal";
+import { UploadDoseModal } from "../components/UploadDoseModal";
 import { CouchTrackingTrend } from "../components/CouchTrackingTrend";
 import { ChartCheckModal } from "../components/ChartCheckModal";
 import { RobustnessDVHCard } from "../components/RobustnessDVHCard";
@@ -309,6 +313,8 @@ export function PlanDetail() {
   const [orthancTab, setOrthancTab] = useState<"plans" | "rt_records" | "offline_images">("plans");
   const [showChartCheckModal, setShowChartCheckModal] = useState(false);
   const [chartCheckCount, setChartCheckCount] = useState<number | null>(null);
+  const [doseStatus, setDoseStatus] = useState<PlanDoseStatus | null>(null);
+  const [showUploadDoseModal, setShowUploadDoseModal] = useState(false);
 
   const interruptedFractions = useMemo(() => {
     return fractionSummaries.filter((f) => f.is_interrupted);
@@ -318,19 +324,21 @@ export function PlanDetail() {
     if (Number.isNaN(id)) return;
     try {
       setLoading(true);
-      const [p, f, r, trend, fracs, checksData] = await Promise.all([
+      const [p, f, r, trend, fracs, checksData, ds] = await Promise.all([
         getPlan(id),
         getPlanFields(id).catch(() => []),
         getPlanResults(id).catch(() => []),
         getFractionalTrend(id).catch(() => null),
         getPlanFractionLogs(id).catch(() => []),
         getChartChecks(id).catch(() => null),
+        getPlanDoseStatus(id).catch(() => null),
       ]);
       setPlan(p);
       setFields(f);
       setResults(r);
       setTrendData(trend);
       setFractionSummaries(fracs);
+      setDoseStatus(ds);
       if (checksData) {
         setChartCheckCount(checksData.total_completed);
       }
@@ -735,6 +743,22 @@ export function PlanDetail() {
               Upload RT Record
             </button>
 
+            {/* Direct Dose Files Upload & Status Action */}
+            <button
+              onClick={() => setShowUploadDoseModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded font-medium transition-colors"
+              title="Inspect DICOM RTDOSE files and upload missing composite or beam doses"
+            >
+              <Layers size={13} />
+              Dose Files
+              {doseStatus && (doseStatus.missing_plan_dose || doseStatus.missing_beam_numbers.length > 0) && (
+                <span
+                  className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"
+                  title="Missing dose files detected"
+                />
+              )}
+            </button>
+
             {/* Gate Mute / Active Toggle Button */}
             <button
               onClick={toggleMuteGate}
@@ -928,6 +952,76 @@ export function PlanDetail() {
         {/* TAB 1: DOSE & GAMMA ANALYSIS */}
         {activeTab === "dose" && (
           <div className="space-y-5">
+            {/* Missing Plan Dose Alert Banner */}
+            {doseStatus && (doseStatus.missing_plan_dose || doseStatus.status === "missing_plan_dose" || doseStatus.status === "missing_files") && (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs text-red-700 dark:text-red-300 shadow-sm">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle size={18} className="text-red-500 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-bold text-sm text-red-900 dark:text-red-200">
+                      Missing Composite Plan RTDOSE File
+                    </div>
+                    <p className="mt-0.5 text-red-800 dark:text-red-300/90 leading-relaxed">
+                      The DICOM export lacks the total plan reference dose (<code className="font-mono text-[11px] bg-red-500/20 px-1 py-0.5 rounded">DoseSummationType=PLAN</code>) and complete beam doses to synthesize it. Composite gamma calculation cannot compare individual beams to the summed Monte Carlo distribution without the full reference dose.
+                    </p>
+                    {doseStatus.warnings.length > 0 && (
+                      <ul className="mt-1.5 list-disc list-inside text-[11px] opacity-90 space-y-0.5">
+                        {doseStatus.warnings.map((w, idx) => (
+                          <li key={idx}>{w}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowUploadDoseModal(true)}
+                  className="shrink-0 flex items-center gap-1.5 px-3.5 py-2 bg-red-600 hover:bg-red-500 text-white font-semibold rounded-lg shadow-sm text-xs transition-colors"
+                >
+                  <UploadCloud size={14} />
+                  Upload Missing Dose Files
+                </button>
+              </div>
+            )}
+
+            {/* Partial Beams Warning Banner */}
+            {doseStatus && doseStatus.status === "partial_beams" && !doseStatus.missing_plan_dose && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-amber-800 dark:text-amber-200">
+                <div className="flex items-start gap-2.5">
+                  <AlertTriangle size={16} className="text-amber-500 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold">Missing Individual Beam RTDOSE File(s):</span>{" "}
+                    Field-by-field gamma evaluation is missing doses for{" "}
+                    {doseStatus.missing_beam_names.map((n, i) => `Beam ${doseStatus.missing_beam_numbers[i]} (${n})`).join(", ")}.
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowUploadDoseModal(true)}
+                  className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white font-medium rounded-lg text-xs transition-colors shadow-sm"
+                >
+                  <UploadCloud size={13} />
+                  Upload Beam Doses
+                </button>
+              </div>
+            )}
+
+            {/* Synthesized Composite Dose Notice */}
+            {doseStatus && doseStatus.is_plan_dose_synthesized && (
+              <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs text-blue-800 dark:text-blue-200">
+                <div className="flex items-center gap-2">
+                  <Info size={16} className="text-blue-500 shrink-0" />
+                  <span>
+                    <span className="font-semibold">Auto-Synthesized Composite Dose:</span> Plan-level RTDOSE was not present in the export. Virtual PSQA automatically synthesized the composite reference dose by summing all {doseStatus.total_beams_count} beam doses.
+                  </span>
+                </div>
+                <button
+                  onClick={() => setShowUploadDoseModal(true)}
+                  className="shrink-0 text-[11px] text-blue-600 dark:text-blue-400 hover:underline font-semibold ml-6 sm:ml-0"
+                >
+                  View Dose Details
+                </button>
+              </div>
+            )}
+
             {/* Top Gamma KPI Summary Banner */}
             <div className="rounded-lg border border-clinical-border bg-clinical-surface p-4 flex flex-col md:flex-row items-center justify-between gap-4">
               <div className="flex items-center gap-4">
@@ -1595,6 +1689,23 @@ export function PlanDetail() {
           }}
         />
       )}
+
+      {/* Upload & Inspect DICOM Dose Modal */}
+      <UploadDoseModal
+        planId={id}
+        planLabel={plan.plan_label}
+        doseStatus={doseStatus}
+        isOpen={showUploadDoseModal}
+        onClose={() => setShowUploadDoseModal(false)}
+        onSuccess={(result) => {
+          setShowUploadDoseModal(false);
+          toast.success(
+            result.message || `Processed ${result.files_saved.length} dose file(s)`
+          );
+          setDoseStatus(result.dose_status);
+          loadPlanData();
+        }}
+      />
 
       {/* Physics Chart Check Modal */}
       <ChartCheckModal

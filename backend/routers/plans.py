@@ -198,3 +198,162 @@ async def get_plan(plan_id: int, db: Session = Depends(get_db)):
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
     return plan
+
+
+@router.get("/{plan_id}/dose-status")
+async def get_plan_dose_status_endpoint(plan_id: int, db: Session = Depends(get_db)):
+    """Returns detailed status of TPS RTDOSE files (plan-level & per-beam) for the plan."""
+    from services.gamma_analysis import check_plan_dose_status
+    try:
+        return check_plan_dose_status(plan_id, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        logger.exception(f"Error checking dose status for plan {plan_id}: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+def _bg_recalculate_gamma(plan_id: int):
+    from database import SessionLocal
+    from services.gamma_analysis import run_gamma_analysis
+    from services.pipeline import persist_gate
+    session = SessionLocal()
+    try:
+        run_gamma_analysis(plan_id, session)
+        persist_gate(plan_id)
+    except Exception as exc:
+        logger.warning(f"Background gamma recalculation for plan {plan_id} failed: {exc}")
+    finally:
+        session.close()
+
+
+@router.post("/{plan_id}/upload-doses")
+@router.post("/{plan_id}/upload-dicom")
+async def upload_plan_doses(
+    plan_id: int,
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    recalculate: bool = True,
+    db: Session = Depends(get_db),
+):
+    """
+    Uploads missing or supplemental RTDOSE (or other plan DICOM) files directly to this plan's
+    DICOM store, clears caches, and optionally triggers a background gamma recalculation.
+    """
+    import hashlib
+    from services.gamma_analysis import check_plan_dose_status, clear_dose_caches, _mc_output_dir
+    from dicom.rtdose_parser import clean_store_duplicates
+
+    plan = db.query(Plan).filter_by(id=plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+
+    dest_dir = Path(plan.dicom_store_path)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_files: list[str] = []
+    ignored_duplicates: list[str] = []
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raw_files = []
+        for idx, upload in enumerate(files):
+            orig_name = Path(upload.filename or f"upload_{idx}.dcm").name
+            dest = Path(tmpdir) / f"{idx}_{orig_name}"
+            content = await upload.read()
+            dest.write_bytes(content)
+            raw_files.append(dest)
+
+        # Unpack any zip archives
+        for rf in list(raw_files):
+            if rf.suffix.lower() == ".zip":
+                try:
+                    extract_dir = Path(tmpdir) / f"extracted_{rf.stem}"
+                    extract_dir.mkdir(exist_ok=True)
+                    with zipfile.ZipFile(rf, "r") as zf:
+                        zf.extractall(str(extract_dir))
+                except Exception as ze:
+                    logger.warning(f"Could not extract zip {rf.name}: {ze}")
+
+        # Gather all valid DICOM files from tmpdir
+        for p in Path(tmpdir).rglob("*"):
+            if p.is_file() and not p.name.startswith(".") and not p.name.lower().endswith(".zip"):
+                try:
+                    dcm = pydicom.dcmread(str(p), stop_before_pixels=True, force=True)
+                except Exception:
+                    continue
+
+                mod = str(getattr(dcm, "Modality", "")).upper()
+                sop = str(getattr(dcm, "SOPInstanceUID", "") or "")
+                p_bytes = p.read_bytes()
+                p_hash = hashlib.sha256(p_bytes).hexdigest()
+
+                # Check duplicate against existing store
+                is_dup = False
+                for ef in dest_dir.glob("*.dcm"):
+                    try:
+                        ef_bytes = ef.read_bytes()
+                        if hashlib.sha256(ef_bytes).hexdigest() == p_hash:
+                            is_dup = True
+                            break
+                        edcm = pydicom.dcmread(str(ef), stop_before_pixels=True, force=True)
+                        if sop and str(getattr(edcm, "SOPInstanceUID", "")) == sop:
+                            is_dup = True
+                            break
+                    except Exception:
+                        pass
+
+                if is_dup:
+                    ignored_duplicates.append(p.name)
+                    continue
+
+                # Copy to plan DICOM store
+                import re
+                clean_stem = re.sub(r"^\d+_", "", p.stem)
+                target_filename = f"{clean_stem}.dcm"
+                target_dest = dest_dir / target_filename
+                counter = 1
+                while target_dest.exists():
+                    target_dest = dest_dir / f"{clean_stem}_{counter}.dcm"
+                    counter += 1
+
+                shutil.copy2(str(p), str(target_dest))
+                saved_files.append(target_dest.name)
+
+                # If plan-level RTDOSE was uploaded, update plan.rtdose_uid
+                if mod == "RTDOSE":
+                    sum_type = str(dcm.get("DoseSummationType", "") or "").upper()
+                    if sum_type == "PLAN" or not plan.rtdose_uid:
+                        plan.rtdose_uid = sop
+                        db.commit()
+
+    if not saved_files and not ignored_duplicates:
+        raise HTTPException(status_code=422, detail="No readable DICOM files found in upload.")
+
+    # Invalidate caches
+    clear_dose_caches()
+    clean_store_duplicates(str(dest_dir))
+
+    # Evaluate updated dose status
+    status = check_plan_dose_status(plan_id, db)
+
+    # If MC results exist and recalculate requested, auto-trigger gamma analysis
+    recalculated = False
+    mc_dir = _mc_output_dir(plan_id)
+    if recalculate and mc_dir.exists() and (mc_dir / "mc_dose.npz").is_file():
+        logger.info(f"Re-running gamma analysis for plan {plan_id} after dose file upload...")
+        background_tasks.add_task(_bg_recalculate_gamma, plan_id)
+        recalculated = True
+
+    return {
+        "success": True,
+        "plan_id": plan_id,
+        "saved_files": saved_files,
+        "files_saved": saved_files,
+        "ignored_duplicates": ignored_duplicates,
+        "files_skipped": ignored_duplicates,
+        "total_saved": len(saved_files),
+        "dose_status": status,
+        "recalculated": recalculated,
+        "gamma_recalculated": recalculated,
+        "message": f"Successfully added {len(saved_files)} file(s) to plan {plan.plan_label}."
+    }

@@ -39,18 +39,29 @@ def find_rtdose_file(dicom_store_path: str, plan_uid: Optional[str] = None) -> O
             summary_type = str(dcm.get("DoseSummationType", "")).upper()
             ref_seq = getattr(dcm, "ReferencedRTPlanSequence", None)
             ref_uids = []
+            has_beam_ref = False
             if ref_seq:
                 for item in ref_seq:
                     uid = getattr(item, "ReferencedSOPInstanceUID", None)
                     if uid:
                         ref_uids.append(str(uid))
+                    for fg in getattr(item, "ReferencedFractionGroupSequence", []):
+                        if getattr(fg, "ReferencedBeamSequence", None):
+                            has_beam_ref = True
+
+            # If this dose file is explicitly an individual beam dose, it CANNOT be the plan-level dose!
+            if summary_type in ("BEAM", "BEAM_SESSION", "CONTROL_POINT") or has_beam_ref:
+                logger.debug(f"Skipping beam-level RTDose {path.name} from plan-level candidates")
+                continue
+
+            if summary_type == "MULTI_PLAN":
+                logger.debug(f"Skipping MULTI_PLAN dose {path.name} for individual plan")
+                continue
 
             if plan_uid is not None:
                 if ref_uids:
                     if plan_uid in ref_uids:
-                        # Multi-plan sum across beamsets should not be treated as a single beamset's dose
-                        if summary_type == "MULTI_PLAN" or len(ref_uids) > 1:
-                            logger.debug(f"Skipping MULTI_PLAN dose {path.name} for individual plan {plan_uid}")
+                        if len(ref_uids) > 1:
                             continue
                         matching_candidates.append(str(path))
                         if summary_type == "PLAN":

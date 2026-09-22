@@ -32,6 +32,8 @@ import type {
   ChartCheckSummary,
   PlanDVHResponse,
   CalculateDVHRequest,
+  PlanDoseStatus,
+  UploadDosesResponse,
 } from "../types";
 
 const api = axios.create({
@@ -80,6 +82,24 @@ export const uploadPlanRecords = (planId: number, files: File[]) => {
   files.forEach((f) => form.append("files", f));
   return api
     .post<PlanIngestionResponse>(`/plans/${planId}/upload-records`, form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    })
+    .then((r) => r.data);
+};
+
+export const getPlanDoseStatus = (planId: number) =>
+  api.get<PlanDoseStatus>(`/plans/${planId}/dose-status`).then((r) => r.data);
+
+export const uploadPlanDoses = (
+  planId: number,
+  files: File[],
+  recalculate: boolean = true
+) => {
+  const form = new FormData();
+  files.forEach((f) => form.append("files", f));
+  return api
+    .post<UploadDosesResponse>(`/plans/${planId}/upload-doses`, form, {
+      params: { recalculate },
       headers: { "Content-Type": "multipart/form-data" },
     })
     .then((r) => r.data);

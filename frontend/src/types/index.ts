@@ -996,5 +996,42 @@ export interface CalculateDVHRequest {
   prescription_dose_gy?: number | null;
 }
 
+// ---------------------------------------------------------------------------
+// Plan Dose Status & Missing File Handling Types
+// ---------------------------------------------------------------------------
 
+export interface ExpectedBeamDose {
+  beam_number: number;
+  beam_name: string;
+  has_dose: boolean;
+  dose_file?: string | null;
+}
 
+export interface PlanDoseStatus {
+  plan_id: number;
+  plan_label: string;
+  number_of_fields: number;
+  has_plan_dose: boolean;
+  plan_dose_file?: string | null;
+  is_plan_dose_synthesized: boolean;
+  expected_beams: ExpectedBeamDose[];
+  all_beams_present: boolean;
+  present_beams_count: number;
+  total_beams_count: number;
+  missing_plan_dose: boolean;
+  missing_beam_numbers: number[];
+  missing_beam_names: string[];
+  status: "complete" | "synthesized" | "missing_plan_dose" | "partial_beams" | "missing_files";
+  warnings: string[];
+}
+
+export interface UploadDosesResponse {
+  plan_id: number;
+  files_saved: string[];
+  files_skipped: string[];
+  total_received: number;
+  total_saved: number;
+  message: string;
+  dose_status: PlanDoseStatus;
+  gamma_recalculated: boolean;
+}

@@ -363,6 +363,35 @@ def _resample_cached(
     return out
 
 
+def _synthesize_composite_dose(beam_doses: dict[int, DoseGrid]) -> Optional[DoseGrid]:
+    """
+    Synthesizes a composite plan-level DoseGrid by summing individual beam DoseGrids.
+    Conforms any differently-shaped beam grids onto the primary reference beam geometry.
+    """
+    if not beam_doses:
+        return None
+    sorted_nums = sorted(beam_doses.keys())
+    ref = beam_doses[sorted_nums[0]]
+    total_array = np.copy(ref.array).astype(np.float32)
+    for num in sorted_nums[1:]:
+        bg = beam_doses[num]
+        if (bg.shape == ref.shape and
+                np.allclose(bg.spacing, ref.spacing) and
+                np.allclose(bg.origin, ref.origin)):
+            total_array += bg.array
+        else:
+            resampled = _resample_to(bg, ref)
+            total_array += resampled.array
+    return DoseGrid(array=total_array, spacing=ref.spacing, origin=ref.origin)
+
+
+def clear_dose_caches() -> None:
+    """Flushes scan, mask, and resample caches (e.g. after uploading new dose files)."""
+    _STORE_SCAN_CACHE.clear()
+    _EXTERNAL_MASK_CACHE.clear()
+    _RESAMPLE_CACHE.clear()
+
+
 def load_plan_doses(plan_id: int, db: Session) -> dict[str, DoseGrid]:
     """
     Returns available dose sources keyed by 'tps', 'mcSquare', 'log', plus
@@ -409,6 +438,21 @@ def load_plan_doses(plan_id: int, db: Session) -> dict[str, DoseGrid]:
             doses[f"tps_beam{beam_num}"] = cached_load(path)
         except Exception:
             continue
+
+    # If plan-level RTDOSE was not found, but all plan beams have individual RTDOSE files:
+    # Synthesize composite TPS dose by summing all beam dose grids.
+    n_fields = getattr(plan, "number_of_fields", None)
+    has_valid_n_fields = isinstance(n_fields, int) and n_fields > 0
+    expected_beams = valid_beams or (set((beam_rtdoses or {}).keys()) if (has_valid_n_fields and len(beam_rtdoses or {}) >= n_fields) else None)
+    if "tps" not in doses and expected_beams and expected_beams.issubset(set((beam_rtdoses or {}).keys())):
+        beam_dose_grids = {b: doses[f"tps_beam{b}"] for b in expected_beams if f"tps_beam{b}" in doses}
+        if len(beam_dose_grids) == len(expected_beams):
+            synth_dose = _synthesize_composite_dose(beam_dose_grids)
+            if synth_dose is not None:
+                doses["tps"] = synth_dose
+                logger.info(
+                    f"Plan {plan_id}: Plan-level RTDose file was missing; synthesized composite TPS dose from {len(expected_beams)} beam dose grids."
+                )
 
     # --- Per-beam MCsquare sources (mc_dose_beam{N}.npz) ---
     mc_dir = _mc_output_dir(plan_id)
@@ -899,3 +943,103 @@ def run_gamma_analysis(
                 f"{n_pass}/{len(passed_map)} comparison(s) passed")
     return {"passed_by_comparison": dict(passed_map),
             "results": results_summary}
+
+
+def check_plan_dose_status(plan_id: int, db: Session) -> dict:
+    """
+    Checks the completeness of TPS RTDOSE files for a plan:
+    - Verifies whether a PLAN-level RTDOSE exists
+    - Verifies whether each expected beam has an individual RTDOSE
+    - Detects whether composite dose is synthesized from beam doses
+    - Identifies missing plan dose and missing beam numbers/names
+    - Provides actionable warning messages for the user
+    """
+    plan = db.query(Plan).filter_by(id=plan_id).first()
+    if plan is None:
+        raise ValueError(f"Plan {plan_id} not found")
+
+    beam_names = _beam_names_from_plan(plan.dicom_store_path, plan_uid=plan.rtplan_uid)
+    valid_beams = set(beam_names.keys()) if beam_names else None
+
+    rtdose_path, beam_rtdoses = _scan_store(
+        plan.dicom_store_path, plan_uid=plan.rtplan_uid, valid_beams=valid_beams
+    )
+
+    has_plan_dose = bool(rtdose_path)
+    plan_dose_file = Path(rtdose_path).name if rtdose_path else None
+
+    n_fields = getattr(plan, "number_of_fields", None)
+    if not beam_names and isinstance(n_fields, int) and n_fields > 0:
+        beam_names = {i: f"Beam {i}" for i in range(1, n_fields + 1)}
+
+    expected_beams = []
+    missing_beam_numbers = []
+    missing_beam_names = []
+
+    for b_num in sorted(beam_names.keys()):
+        b_name = beam_names[b_num]
+        b_path = (beam_rtdoses or {}).get(b_num)
+        has_b_dose = bool(b_path)
+        dose_filename = Path(b_path).name if b_path else None
+        expected_beams.append({
+            "beam_number": b_num,
+            "beam_name": b_name,
+            "has_dose": has_b_dose,
+            "has_rtdose": has_b_dose,
+            "dose_file": dose_filename,
+            "file_name": dose_filename,
+        })
+        if not has_b_dose:
+            missing_beam_numbers.append(b_num)
+            missing_beam_names.append(b_name)
+
+    total_expected = len(expected_beams)
+    present_beams_count = total_expected - len(missing_beam_numbers)
+    all_beams_present = (total_expected > 0 and len(missing_beam_numbers) == 0)
+
+    is_plan_dose_synthesized = (not has_plan_dose) and all_beams_present
+    missing_plan_dose = (not has_plan_dose) and (not all_beams_present)
+
+    warnings: list[str] = []
+    if is_plan_dose_synthesized:
+        warnings.append(
+            f"Plan-level RTDOSE was not found in the DICOM export; a composite reference dose was automatically synthesized by summing all {total_expected} beam doses."
+        )
+    elif missing_plan_dose:
+        warnings.append(
+            "Missing total plan RTDOSE file (DoseSummationType=PLAN). Upload the composite plan dose file to enable full plan gamma analysis."
+        )
+
+    if missing_beam_numbers:
+        missing_str = ", ".join(f"Beam {n} ({beam_names.get(n, n)})" for n in missing_beam_numbers)
+        warnings.append(
+            f"Missing individual RTDOSE file(s) for: {missing_str}. Field-by-field gamma evaluation requires per-beam RTDOSE files."
+        )
+
+    status = "complete"
+    if missing_plan_dose and missing_beam_numbers:
+        status = "missing_files"
+    elif missing_plan_dose:
+        status = "missing_plan_dose"
+    elif missing_beam_numbers:
+        status = "partial_beams"
+    elif is_plan_dose_synthesized:
+        status = "synthesized"
+
+    return {
+        "plan_id": plan_id,
+        "plan_label": plan.plan_label,
+        "number_of_fields": plan.number_of_fields,
+        "has_plan_dose": has_plan_dose,
+        "plan_dose_file": plan_dose_file,
+        "is_plan_dose_synthesized": is_plan_dose_synthesized,
+        "expected_beams": expected_beams,
+        "all_beams_present": all_beams_present,
+        "present_beams_count": present_beams_count,
+        "total_beams_count": total_expected,
+        "missing_plan_dose": missing_plan_dose,
+        "missing_beam_numbers": missing_beam_numbers,
+        "missing_beam_names": missing_beam_names,
+        "status": status,
+        "warnings": warnings,
+    }

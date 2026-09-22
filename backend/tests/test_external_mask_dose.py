@@ -188,3 +188,177 @@ def test_load_plan_doses_masks_mcsquare():
             gamma_analysis._scan_store = orig_scan_store
             gamma_analysis._latest_job_result = orig_latest
             gamma_analysis.cached_load = orig_cached_load
+
+
+def test_find_rtdose_file_skips_beam_doses():
+    from dicom.rtdose_parser import find_rtdose_file
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        # Create an RTDOSE that is a BEAM dose
+        file_path = tmp_path / "beam1_dose.dcm"
+        file_meta = FileMetaDataset()
+        file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.481.2"
+        file_meta.MediaStorageSOPInstanceUID = "1.2.826.0.1.3680043.9.7243.rtdose.beam1"
+        file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+
+        ds = pydicom.dataset.FileDataset(str(file_path), {}, file_meta=file_meta, preamble=b"\0" * 128)
+        ds.Modality = "RTDOSE"
+        ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.481.2"
+        ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+        ds.DoseSummationType = "BEAM"
+
+        ref_plan = Dataset()
+        ref_plan.ReferencedSOPInstanceUID = "1.2.3.plan"
+        ref_fg = Dataset()
+        ref_fg.ReferencedFractionGroupNumber = 1
+        ref_beam = Dataset()
+        ref_beam.ReferencedBeamNumber = 1
+        ref_fg.ReferencedBeamSequence = Sequence([ref_beam])
+        ref_plan.ReferencedFractionGroupSequence = Sequence([ref_fg])
+        ds.ReferencedRTPlanSequence = Sequence([ref_plan])
+
+        ds.save_as(str(file_path))
+
+        # find_rtdose_file MUST NOT return this beam dose as the plan-level dose!
+        plan_dose = find_rtdose_file(str(tmp_path), plan_uid="1.2.3.plan")
+        assert plan_dose is None
+
+
+def test_load_plan_doses_synthesizes_when_plan_dose_missing():
+    from services.gamma_analysis import load_plan_doses, check_plan_dose_status
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        b1_grid = DoseGrid(
+            array=np.full((5, 50, 50), 2.0, dtype=np.float32),
+            spacing=(2.0, 1.0, 1.0),
+            origin=(6.0, 0.0, 0.0),
+        )
+        b2_grid = DoseGrid(
+            array=np.full((5, 50, 50), 3.0, dtype=np.float32),
+            spacing=(2.0, 1.0, 1.0),
+            origin=(6.0, 0.0, 0.0),
+        )
+
+        plan = MagicMock(spec=Plan)
+        plan.id = 888
+        plan.plan_label = "Test_2Field"
+        plan.number_of_fields = 2
+        plan.dicom_store_path = str(tmp_path)
+        plan.rtplan_uid = "1.2.3.4"
+
+        db = MagicMock()
+        db.query().filter_by().first.return_value = plan
+
+        from services import gamma_analysis
+        orig_scan_store = gamma_analysis._scan_store
+        orig_beam_names = gamma_analysis._beam_names_from_plan
+        orig_cached_load = gamma_analysis.cached_load
+
+        try:
+            # rtdose_path is None (missing plan dose), but both beam doses exist!
+            gamma_analysis._beam_names_from_plan = MagicMock(return_value={1: "Beam 1", 2: "Beam 2"})
+            gamma_analysis._scan_store = MagicMock(return_value=(None, {1: str(tmp_path / "b1.dcm"), 2: str(tmp_path / "b2.dcm")}))
+            def fake_load(path):
+                if "b1" in path:
+                    return b1_grid
+                return b2_grid
+            gamma_analysis.cached_load = fake_load
+
+            doses = load_plan_doses(888, db)
+            assert "tps" in doses
+            assert np.isclose(doses["tps"].array[2, 20, 20], 5.0)  # 2.0 + 3.0 = 5.0
+
+            # Check status
+            status = check_plan_dose_status(888, db)
+            assert status["has_plan_dose"] is False
+            assert status["is_plan_dose_synthesized"] is True
+            assert status["all_beams_present"] is True
+            assert len(status["missing_beam_numbers"]) == 0
+        finally:
+            gamma_analysis._scan_store = orig_scan_store
+            gamma_analysis._beam_names_from_plan = orig_beam_names
+            gamma_analysis.cached_load = orig_cached_load
+
+
+def test_dose_status_and_upload_endpoints():
+    import uuid
+    from fastapi.testclient import TestClient
+    from main import app
+    from config import settings
+    from database import SessionLocal
+    from models.patient import Patient
+    from models.plan import Plan
+    from services.auth_service import create_session_token
+
+    token = create_session_token("admin")
+    client = TestClient(app, cookies={settings.AUTH_SESSION_COOKIE: token})
+
+    db = SessionLocal()
+    uid_str = uuid.uuid4().hex[:8]
+    p_id = f"P_DOSE_{uid_str}"
+    plan_uid = f"1.2.826.0.1.3680043.9.7243.{uid_str}"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        patient = Patient(patient_id=p_id, patient_name="Dose Test")
+        db.add(patient)
+        db.commit()
+        db.refresh(patient)
+
+        plan = Plan(
+            patient_id=patient.id,
+            plan_label=f"Plan_{uid_str}",
+            plan_name="Plan Dose Test",
+            number_of_fields=3,
+            dicom_store_path=str(tmpdir),
+            rtplan_uid=plan_uid,
+            qa_status="pending",
+        )
+        db.add(plan)
+        db.commit()
+        db.refresh(plan)
+
+        # 1. Check dose status before uploading any dose file
+        resp = client.get(f"/api/plans/{plan.id}/dose-status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["has_plan_dose"] is False
+        assert data["missing_plan_dose"] is True
+        assert len(data["missing_beam_numbers"]) == 3
+
+        # 2. Upload an RTDOSE file using the new upload-doses endpoint
+        with tempfile.TemporaryDirectory() as upload_src_dir:
+            dose_file_path = Path(upload_src_dir) / "source_dose.dcm"
+            file_meta = FileMetaDataset()
+            file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.481.2"
+            file_meta.MediaStorageSOPInstanceUID = "1.2.826.0.1.3680043.9.7243.rtdose.upload"
+            file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+
+            ds = pydicom.dataset.FileDataset(str(dose_file_path), {}, file_meta=file_meta, preamble=b"\0" * 128)
+            ds.Modality = "RTDOSE"
+            ds.SOPClassUID = "1.2.840.10008.5.1.4.1.1.481.2"
+            ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+            ds.DoseSummationType = "PLAN"
+            ref_plan = Dataset()
+            ref_plan.ReferencedSOPInstanceUID = plan_uid
+            ds.ReferencedRTPlanSequence = Sequence([ref_plan])
+            ds.save_as(str(dose_file_path))
+
+            with open(dose_file_path, "rb") as f:
+                upload_resp = client.post(
+                    f"/api/plans/{plan.id}/upload-doses",
+                    files={"files": ("plan_dose.dcm", f, "application/dicom")},
+                    data={"recalculate": "false"},
+                )
+            assert upload_resp.status_code == 200
+            up_data = upload_resp.json()
+            assert up_data["success"] is True
+            assert "plan_dose.dcm" in up_data["saved_files"]
+            assert up_data["dose_status"]["has_plan_dose"] is True
+
+        # Clean up db
+        db.delete(plan)
+        db.delete(patient)
+        db.commit()
+    db.close()
