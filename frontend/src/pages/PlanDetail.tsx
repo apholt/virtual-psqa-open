@@ -532,18 +532,17 @@ export function PlanDetail() {
     }
   };
 
-  if (loading && !plan) {
-    return (
-      <div className="min-h-screen bg-clinical-bg flex items-center justify-center text-clinical-muted text-xs">
-        <Loader2 className="animate-spin mr-2" size={16} /> Loading plan QA cockpit…
-      </div>
-    );
-  }
-
-  if (!plan) return null;
-
-  const mcResults = results.filter((r) => r.comparison_type === "mcSquare_vs_TPS");
-  const logResults = results.filter((r) => r.comparison_type === "log_vs_Rx" || r.comparison_type === "log_vs_TPS");
+  const mcResults = useMemo(
+    () => results.filter((r) => r.comparison_type === "mcSquare_vs_TPS"),
+    [results]
+  );
+  const logResults = useMemo(
+    () =>
+      results.filter(
+        (r) => r.comparison_type === "log_vs_Rx" || r.comparison_type === "log_vs_TPS"
+      ),
+    [results]
+  );
   const mcComposite = useMemo(() => {
     const explicit = mcResults.find(
       (r) => r.field_name === "Composite" || r.beam_number === null
@@ -558,6 +557,16 @@ export function PlanDetail() {
     const list = hasPerBeam ? mcResults.filter((r) => r.beam_number != null) : mcResults;
     return [...list].sort((a, b) => (a.beam_number ?? 0) - (b.beam_number ?? 0));
   }, [mcResults]);
+
+  if (loading && !plan) {
+    return (
+      <div className="min-h-screen bg-clinical-bg flex items-center justify-center text-clinical-muted text-xs">
+        <Loader2 className="animate-spin mr-2" size={16} /> Loading plan QA cockpit…
+      </div>
+    );
+  }
+
+  if (!plan) return null;
 
   return (
     <div className="min-h-screen bg-clinical-bg">
