@@ -682,30 +682,45 @@ def save_gamma_map(
 
 
 def compute_gamma_plane(
-    plan_id: int, comparison: str, z_index: int, db: Session
+    plan_id: int,
+    comparison: str,
+    z_index: int,
+    db: Session,
+    beam_number: Optional[int] = None,
 ) -> tuple[np.ndarray, float]:
     """
     Live gamma computation for a single plane (used by the dose viewer overlay).
+    When beam_number is specified, evaluates the per-beam doses if available.
     """
     spec = next((s for s in _comparison_specs() if s.name == comparison), None)
     if spec is None:
         raise ValueError(f"Unknown comparison: {comparison}")
 
     doses = load_plan_doses(plan_id, db)
-    if spec.reference not in doses or spec.evaluation not in doses:
+    ref_key = spec.reference
+    ev_key = spec.evaluation
+    if beam_number is not None:
+        beam_ref = f"{spec.reference}_beam{beam_number}"
+        beam_ev = f"{spec.evaluation}_beam{beam_number}"
+        if beam_ref in doses and beam_ev in doses:
+            ref_key = beam_ref
+            ev_key = beam_ev
+
+    if ref_key not in doses or ev_key not in doses:
         raise FileNotFoundError(
             f"Doses for {comparison} not available "
-            f"(need {spec.reference} and {spec.evaluation})."
+            f"(need {ref_key} and {ev_key})."
         )
 
-    ref = doses[spec.reference]
-    ev = doses[spec.evaluation]
+    ref = doses[ref_key]
+    ev = doses[ev_key]
     z = max(0, min(z_index, ref.shape[0] - 1))
     return _gamma_eval(
         ref.plane(z), ev.plane(z),
         dd=spec.dd, dta=spec.dta,
         voxel_mm=_in_plane_voxel_mm(ref),
     )
+
 
 
 # GATE_VERDICT_V1 -- compute_verdict() removed.

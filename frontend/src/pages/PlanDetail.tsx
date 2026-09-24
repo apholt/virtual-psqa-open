@@ -419,10 +419,12 @@ export function PlanDetail() {
     });
   }, [doseInfo, fieldSel]);
 
+  const selectedBeamNum = fieldSel === "summed" ? undefined : fieldSel;
+
   useEffect(() => {
     if (!doseInfo || viewMode !== "dose" || Number.isNaN(id)) return;
     let live = true;
-    getGammaPlane(id, "mcSquare_vs_TPS", z)
+    getGammaPlane(id, "mcSquare_vs_TPS", z, selectedBeamNum)
       .then((p) => {
         if (live) setGammaMcTps(p);
       })
@@ -432,7 +434,7 @@ export function PlanDetail() {
     return () => {
       live = false;
     };
-  }, [doseInfo, id, z, viewMode]);
+  }, [doseInfo, id, z, viewMode, selectedBeamNum]);
 
   useEffect(() => {
     if (!doseInfo || Number.isNaN(id)) return;
@@ -451,7 +453,7 @@ export function PlanDetail() {
       });
     } else {
       doseInfo.available_comparisons.forEach((comp) => {
-        getGammaPlane(id, comp, z)
+        getGammaPlane(id, comp, z, selectedBeamNum)
           .then((plane) => {
             if (reqToken.current === token) {
               setGammaPlanes((prev) => ({ ...prev, [comp]: plane }));
@@ -460,7 +462,7 @@ export function PlanDetail() {
           .catch(() => undefined);
       });
     }
-  }, [doseInfo, id, z, viewMode, activeSources, resolveSource]);
+  }, [doseInfo, id, z, viewMode, activeSources, resolveSource, selectedBeamNum]);
 
   const scaleMax = useMemo(() => {
     let m = 0;
@@ -504,7 +506,7 @@ export function PlanDetail() {
     [loadPlanData]
   );
 
-  const handleLaunchJob = async (type: "mcSquare" | "log_reconstruction", force: boolean = false) => {
+  const handleLaunchJob = async (type: "mcSquare" | "log_reconstruction" | "gamma", force: boolean = false) => {
     if (Number.isNaN(id)) return;
     try {
       setJobPolling(true);
@@ -513,6 +515,8 @@ export function PlanDetail() {
       toast.success(
         force
           ? "Starting full MC calculation (clearing cache)..."
+          : type === "gamma"
+          ? "Secondary 3D gamma calculation launched!"
           : `${type === "mcSquare" ? "MCsquare simulation" : "Log reconstruction"} launched!`
       );
       pollJob(job.id);
@@ -666,6 +670,18 @@ export function PlanDetail() {
               <Zap size={13} className="text-amber-500" />
               Run Log Recon
             </button>
+
+            {doseInfo?.sources.some((s) => s.source.startsWith("mcSquare")) && (
+              <button
+                onClick={() => handleLaunchJob("gamma")}
+                disabled={jobPolling}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-clinical-surface hover:bg-clinical-border/30 border border-clinical-border rounded text-clinical-text transition-colors disabled:opacity-50"
+                title="Recalculate 3D gamma analysis for all beams and composite using current dose grids and external contours"
+              >
+                <RotateCcw size={12} className="text-clinical-accent" />
+                Recalculate Gamma
+              </button>
+            )}
 
             {/* Secondary Dose Report Actions */}
             <div className="flex items-center rounded border border-clinical-border bg-clinical-surface overflow-hidden">
@@ -1070,6 +1086,8 @@ export function PlanDetail() {
                   <p className="text-[11px] text-clinical-muted mt-1">
                     {mcFieldResults.length > 0
                       ? `${mcFieldResults.filter((r) => r.passed).length} of ${mcFieldResults.length} fields meet clinical tolerance.`
+                      : doseInfo?.sources.some((s) => s.source.startsWith("mcSquare"))
+                      ? "MC dose available. Click 'Recalculate Gamma' above to compute 3D evaluations."
                       : "Secondary calculation pending. Click 'Run MC Simulation' above to calculate."}
                   </p>
                 </div>
@@ -1206,7 +1224,7 @@ export function PlanDetail() {
 
                     <div className="border border-clinical-border rounded-lg p-3 bg-clinical-bg/30">
                       <div className="flex items-center justify-between text-xs font-semibold text-clinical-text mb-2">
-                        <span>Secondary Gamma Map</span>
+                        <span>{selectedBeamNum != null ? `Beam ${selectedBeamNum} Gamma Map` : "Secondary Gamma Map"}</span>
                         <span className="text-[10px] font-bold text-green-600 dark:text-green-400">
                           {gammaMcTps?.passingRate ? `${gammaMcTps.passingRate.toFixed(1)}% Pass` : "3%/3mm"}
                         </span>
@@ -1229,7 +1247,7 @@ export function PlanDetail() {
                       return (
                         <div key={comp} className="border border-clinical-border rounded-lg p-3 bg-clinical-bg/30">
                           <div className="flex items-center justify-between text-xs font-semibold text-clinical-text mb-2">
-                            <span>{COMPARISON_LABELS[comp] || comp}</span>
+                            <span>{selectedBeamNum != null ? `Beam ${selectedBeamNum} (${COMPARISON_LABELS[comp] || comp})` : (COMPARISON_LABELS[comp] || comp)}</span>
                             {gp?.passingRate != null && (
                               <span className="text-xs font-bold text-green-600 dark:text-green-400">
                                 {gp.passingRate.toFixed(1)}%
@@ -1354,8 +1372,18 @@ export function PlanDetail() {
                   <tbody>
                     {mcFieldResults.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="py-4 text-center text-clinical-muted">
-                          No openMCsquare gamma evaluations recorded yet.
+                        <td colSpan={7} className="py-6 text-center text-clinical-muted">
+                          <div>No openMCsquare gamma evaluations recorded yet.</div>
+                          {doseInfo?.sources.some((s) => s.source.startsWith("mcSquare")) && (
+                            <button
+                              onClick={() => handleLaunchJob("gamma")}
+                              disabled={jobPolling}
+                              className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 bg-clinical-surface hover:bg-clinical-border/40 border border-clinical-border text-clinical-text text-xs rounded transition-colors"
+                            >
+                              <RotateCcw size={12} className="text-clinical-accent" />
+                              Calculate 3D Gamma Evaluations
+                            </button>
+                          )}
                         </td>
                       </tr>
                     ) : (

@@ -196,11 +196,15 @@ export const getCTPlane = async (
 export const getGammaPlane = async (
   planId: number,
   comparison: string,
-  z: number
+  z: number,
+  beam?: number
 ): Promise<PlaneData> => {
   const r = await api.get<ArrayBuffer>(
     `/results/plan/${planId}/gamma/${comparison}/plane/${z}`,
-    { responseType: "arraybuffer" }
+    {
+      responseType: "arraybuffer",
+      params: beam != null ? { beam } : undefined,
+    }
   );
   return {
     data: new Float32Array(r.data),

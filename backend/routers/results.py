@@ -28,7 +28,7 @@ _SOURCE_LABELS = {"tps": "TPS", "mcSquare": "MCsquare", "log": "Log recon"}
 
 
 @router.get("/plan/{plan_id}", response_model=list[GammaResultResponse])
-async def get_plan_results(plan_id: int, db: Session = Depends(get_db)):
+def get_plan_results(plan_id: int, db: Session = Depends(get_db)):
     """Returns all stored gamma results for a plan, auto-generating composite if missing."""
     try:
         from services.gamma_analysis import ensure_composite_gamma
@@ -160,15 +160,22 @@ async def get_spot_stats(plan_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/plan/{plan_id}/gamma/{comparison}/plane/{z}")
-async def get_gamma_plane(
-    plan_id: int, comparison: str, z: int, db: Session = Depends(get_db)
+def get_gamma_plane(
+    plan_id: int,
+    comparison: str,
+    z: int,
+    beam: Optional[int] = None,
+    db: Session = Depends(get_db),
 ):
     """
     Live gamma map for a single plane as float32 binary (NaN where excluded).
     Passing rate is returned in the X-Passing-Rate header.
+    When beam is specified, evaluates that beam's doses.
     """
     try:
-        gamma_map, passing_rate = compute_gamma_plane(plan_id, comparison, z, db)
+        gamma_map, passing_rate = compute_gamma_plane(
+            plan_id, comparison, z, db, beam_number=beam
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
