@@ -39,6 +39,7 @@ import type {
 const api = axios.create({
   baseURL: "/api",
   headers: { "Content-Type": "application/json" },
+  timeout: 15000,
 });
 
 api.interceptors.response.use(

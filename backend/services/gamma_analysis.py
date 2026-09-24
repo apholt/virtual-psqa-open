@@ -203,7 +203,11 @@ def _external_mask(target: DoseGrid, dicom_store_path: str) -> Optional[np.ndarr
     # Search in both dicom_store_path and its parent (in case DICOM files are organized by study/series subfolders)
     search_dirs = [Path(dicom_store_path)]
     parent = Path(dicom_store_path).parent
-    if parent.exists() and parent != Path(dicom_store_path) and parent.name not in ("", ".", "/"):
+    if (
+        parent.exists()
+        and parent != Path(dicom_store_path)
+        and parent.name not in ("", ".", "/", "data", "dicom_store", "tmp")
+    ):
         search_dirs.append(parent)
 
     rtstruct_paths: list[str] = []
@@ -1126,24 +1130,6 @@ def ensure_composite_gamma(plan_id: int, db: Session) -> Optional[GammaResult]:
         .all()
     )
     if not beam_results:
-        # If no gamma rows exist at all for this plan, run full gamma analysis so both
-        # per-beam and composite results are generated and stored
-        try:
-            doses = load_plan_doses(plan_id, db)
-            if "tps" in doses and "mcSquare" in doses:
-                run_gamma_analysis(plan_id, db)
-                return (
-                    db.query(GammaResult)
-                    .filter(
-                        GammaResult.plan_id == plan_id,
-                        GammaResult.comparison_type == "mcSquare_vs_TPS",
-                        GammaResult.fraction_number.is_(None),
-                        (GammaResult.field_name == "Composite") | (GammaResult.beam_number.is_(None)),
-                    )
-                    .first()
-                )
-        except Exception as exc:
-            logger.debug(f"Auto-run gamma analysis in ensure_composite_gamma failed: {exc}")
         return None
 
     try:

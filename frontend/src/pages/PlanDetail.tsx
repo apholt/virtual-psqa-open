@@ -321,11 +321,14 @@ export function PlanDetail() {
   }, [fractionSummaries]);
 
   const loadPlanData = useCallback(async () => {
-    if (Number.isNaN(id)) return;
+    if (Number.isNaN(id)) {
+      setLoading(false);
+      return;
+    }
     try {
       setLoading(true);
       const [p, f, r, trend, fracs, checksData, ds] = await Promise.all([
-        getPlan(id),
+        getPlan(id).catch(() => null),
         getPlanFields(id).catch(() => []),
         getPlanResults(id).catch(() => []),
         getFractionalTrend(id).catch(() => null),
@@ -343,13 +346,15 @@ export function PlanDetail() {
         setChartCheckCount(checksData.total_completed);
       }
 
-      try {
-        const di = await getPlanDoseInfo(id);
-        setDoseInfo(di);
-        setZ(di.default_plane);
-        setZUI(di.default_plane);
-      } catch {
-        setDoseInfo(null);
+      if (p) {
+        try {
+          const di = await getPlanDoseInfo(id);
+          setDoseInfo(di);
+          setZ(di.default_plane);
+          setZUI(di.default_plane);
+        } catch {
+          setDoseInfo(null);
+        }
       }
     } catch {
       toast.error("Failed to load plan details.");
@@ -570,7 +575,27 @@ export function PlanDetail() {
     );
   }
 
-  if (!plan) return null;
+  if (!plan) {
+    return (
+      <div className="min-h-screen bg-clinical-bg">
+        <NavBar />
+        <div className="max-w-2xl mx-auto px-4 py-16 text-center">
+          <div className="bg-clinical-surface border border-clinical-border rounded-lg p-8 shadow-sm">
+            <h2 className="text-base font-semibold text-clinical-text mb-2">Plan Not Found</h2>
+            <p className="text-xs text-clinical-muted mb-6">
+              Unable to load plan details for ID #{planId || "unknown"}.
+            </p>
+            <button
+              onClick={() => navigate("/")}
+              className="px-4 py-2 text-xs font-medium bg-clinical-accent text-white rounded-md hover:bg-clinical-accent/90 transition-colors cursor-pointer"
+            >
+              Return to Dashboard
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-clinical-bg">
