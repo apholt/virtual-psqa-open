@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { Link } from "react-router-dom";
 import toast from "react-hot-toast";
 import {
   Settings as SettingsIcon,
@@ -12,6 +13,9 @@ import {
   Layers,
   Sliders,
   HardDrive,
+  ShieldCheck,
+  ExternalLink,
+  FileText,
 } from "lucide-react";
 import {
   getSettings,
@@ -740,6 +744,31 @@ export function Settings() {
                     className="w-full text-xs font-mono bg-clinical-bg border border-clinical-border rounded-lg px-3 py-2 text-clinical-text focus:outline-none focus:border-indigo-500"
                   />
                 </div>
+              </div>
+            </div>
+
+            {/* HIPAA Security & Audit Logs */}
+            <div className="rounded-lg border border-clinical-border bg-clinical-surface p-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-lg bg-indigo-500/10 text-indigo-500 border border-indigo-500/20">
+                    <ShieldCheck size={22} />
+                  </div>
+                  <div>
+                    <h2 className="text-sm font-semibold text-clinical-text">HIPAA Security &amp; Audit Logs</h2>
+                    <p className="text-xs text-clinical-muted mt-0.5">
+                      Review tamper-evident audit trails, user logins, DICOM access events, and export compliance reports.
+                    </p>
+                  </div>
+                </div>
+                <Link
+                  to="/audit-logs"
+                  className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-md shadow-sm transition-colors shrink-0"
+                >
+                  <FileText size={14} />
+                  Open Audit Log Viewer
+                  <ExternalLink size={12} className="opacity-80 ml-0.5" />
+                </Link>
               </div>
             </div>
           </div>

@@ -34,6 +34,9 @@ import type {
   CalculateDVHRequest,
   PlanDoseStatus,
   UploadDosesResponse,
+  AuditLogItem,
+  AuditLogStats,
+  AuditLogParams,
 } from "../types";
 
 const api = axios.create({
@@ -591,6 +594,22 @@ export const calculatePlanDVH = (
   api
     .post<PlanDVHResponse>(`/results/plan/${planId}/dvh/calculate`, payload)
     .then((r) => r.data);
+
+// ---------------------------------------------------------------------------
+// HIPAA Security & Audit Logs (§ 164.312(b))
+// ---------------------------------------------------------------------------
+
+export const getAuditLogs = async (
+  params?: AuditLogParams
+): Promise<{ items: AuditLogItem[]; total: number }> => {
+  const res = await api.get<AuditLogItem[]>("/auth/audit-logs", { params });
+  const headerTotal = res.headers["x-total-count"];
+  const total = headerTotal ? parseInt(headerTotal, 10) : res.data.length;
+  return { items: res.data, total: Number.isNaN(total) ? res.data.length : total };
+};
+
+export const getAuditLogStats = () =>
+  api.get<AuditLogStats>("/auth/audit-logs/stats").then((r) => r.data);
 
 export default api;
 

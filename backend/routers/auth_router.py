@@ -25,7 +25,12 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import get_db
-from services.audit_service import get_audit_logs, log_audit_event
+from services.audit_service import (
+    count_audit_logs,
+    get_audit_logs,
+    get_audit_stats,
+    log_audit_event,
+)
 from services.auth_service import (
     authenticate_user,
     create_session_token,
@@ -503,14 +508,56 @@ async def add_new_user(
 
 @router.get("/api/auth/audit-logs")
 async def get_audit_trail(
+    response: Response,
     limit: int = 50,
     skip: int = 0,
     username: Optional[str] = None,
     action: Optional[str] = None,
+    target_type: Optional[str] = None,
+    search: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    """Query HIPAA audit logs (§ 164.312(b))."""
-    logs = get_audit_logs(limit=limit, skip=skip, username=username, action=action, db=db)
+    """Query HIPAA audit logs (§ 164.312(b)) with full-text search and date range filters."""
+    from datetime import datetime as _dt
+    s_dt = None
+    if start_date:
+        try:
+            s_dt = _dt.fromisoformat(start_date.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            pass
+    e_dt = None
+    if end_date:
+        try:
+            e_dt = _dt.fromisoformat(end_date.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            pass
+
+    total = count_audit_logs(
+        username=username,
+        action=action,
+        target_type=target_type,
+        search=search,
+        start_date=s_dt,
+        end_date=e_dt,
+        db=db,
+    )
+    logs = get_audit_logs(
+        limit=limit,
+        skip=skip,
+        username=username,
+        action=action,
+        target_type=target_type,
+        search=search,
+        start_date=s_dt,
+        end_date=e_dt,
+        db=db,
+    )
+
+    response.headers["X-Total-Count"] = str(total)
+    response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
+
     return [
         {
             "id": l.id,
@@ -524,3 +571,9 @@ async def get_audit_trail(
         }
         for l in logs
     ]
+
+
+@router.get("/api/auth/audit-logs/stats")
+async def get_audit_trail_stats(db: Session = Depends(get_db)):
+    """Retrieve statistical summary of audit logs for dashboard/admin view."""
+    return get_audit_stats(db=db)

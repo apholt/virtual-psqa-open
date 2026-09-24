@@ -1035,3 +1035,37 @@ export interface UploadDosesResponse {
   dose_status: PlanDoseStatus;
   gamma_recalculated: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Audit Log Types (§ 164.312(b))
+// ---------------------------------------------------------------------------
+
+export interface AuditLogItem {
+  id: number;
+  timestamp: string;
+  username: string;
+  action: string;
+  target_type?: string | null;
+  target_id?: string | null;
+  details?: string | null;
+  ip_address?: string | null;
+}
+
+export interface AuditLogStats {
+  total_logs: number;
+  logins_today: number;
+  failures_today: number;
+  unique_users: number;
+  recent_actions: Record<string, number>;
+}
+
+export interface AuditLogParams {
+  limit?: number;
+  skip?: number;
+  username?: string;
+  action?: string;
+  target_type?: string;
+  search?: string;
+  start_date?: string;
+  end_date?: string;
+}

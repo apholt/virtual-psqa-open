@@ -17,6 +17,7 @@ interface TopbarProps {
 
 const NAV = [
   { to: "/", label: "Dashboard" },
+  { to: "/audit-logs", label: "Audit Logs" },
   { to: "/settings", label: "Settings" },
 ];
 

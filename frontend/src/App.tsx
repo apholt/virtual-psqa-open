@@ -11,6 +11,7 @@ import { DoseComparison } from "./pages/DoseComparison";
 import { GammaDetail } from "./pages/GammaDetail";
 import { FractionalTracker } from "./pages/FractionalTracker";
 import { Settings } from "./pages/Settings";
+import { AuditLogs } from "./pages/AuditLogs";
 
 export default function App() {
   return (
@@ -30,6 +31,7 @@ export default function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/worklist" element={<Navigate to="/" replace />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/audit-logs" element={<AuditLogs />} />
         <Route path="/patients/:patientId/plans" element={<PatientPlans />} />
         <Route path="/plans/:planId/ingestion" element={<PlanIngestion />} />
         <Route path="/plans/:planId" element={<PlanDetail />} />
