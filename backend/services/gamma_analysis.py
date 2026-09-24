@@ -473,11 +473,18 @@ def load_plan_doses(plan_id: int, db: Session) -> dict[str, DoseGrid]:
     # --- Conform CT-grid MCsquare doses onto the matching TPS grid ---
     # The gamma engine requires identical shapes; the worker emits MC dose on the
     # CT grid while the TPS RTDose is a different, cropped grid. Resample MC->TPS.
-    # Mask MCsquare dose to the external patient contour so it matches the TPS
-    # reference dose display and zeroes couch/air scatter outside the body.
+    # Mask both MCsquare and TPS doses to the external patient contour (TG-218)
+    # so dose displays and gamma comparisons evaluate strictly within the patient,
+    # zeroing couch and air scatter outside the body.
     # Uses the resample cache: this function runs per viewer request, and
     # uncached resampling of CT-grid volumes is what made the UI lag.
     ext_tps = _external_mask(doses["tps"], plan.dicom_store_path) if "tps" in doses else None
+    if "tps" in doses and ext_tps is not None:
+        doses["tps"] = DoseGrid(
+            array=np.where(ext_tps, doses["tps"].array, 0.0).astype(np.float32),
+            spacing=doses["tps"].spacing,
+            origin=doses["tps"].origin,
+        )
     if "tps" in doses and "mcSquare" in doses:
         doses["mcSquare"] = _resample_cached(
             mc_path, doses["mcSquare"], doses["tps"], ext_mask=ext_tps
@@ -494,6 +501,23 @@ def load_plan_doses(plan_id: int, db: Session) -> dict[str, DoseGrid]:
             )
             doses[key] = _resample_cached(
                 mc_beam_paths.get(key, key), doses[key], target, ext_mask=ext_target
+            )
+    for key in [k for k in doses if k.startswith("tps_beam")]:
+        ext_beam = (
+            ext_tps
+            if (
+                "tps" in doses
+                and doses[key].shape == doses["tps"].shape
+                and np.allclose(doses[key].origin, doses["tps"].origin)
+                and np.allclose(doses[key].spacing, doses["tps"].spacing)
+            )
+            else _external_mask(doses[key], plan.dicom_store_path)
+        )
+        if ext_beam is not None:
+            doses[key] = DoseGrid(
+                array=np.where(ext_beam, doses[key].array, 0.0).astype(np.float32),
+                spacing=doses[key].spacing,
+                origin=doses[key].origin,
             )
 
     return doses

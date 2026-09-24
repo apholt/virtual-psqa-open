@@ -145,6 +145,7 @@ def test_load_plan_doses_masks_mcsquare():
             origin=(6.0, 0.0, 0.0),
         )
         tps_grid.array[2, 15:25, 15:25] = 2.0  # TPS dose inside body
+        tps_grid.array[2, 0, 0] = 2.0  # TPS dose in couch outside body
 
         mc_grid = DoseGrid(
             array=np.full((5, 50, 50), 2.0, dtype=np.float32),  # MC dose everywhere (including couch/air)
@@ -178,13 +179,18 @@ def test_load_plan_doses_masks_mcsquare():
 
             doses = load_plan_doses(999, db)
             assert "mcSquare" in doses
+            assert "tps" in doses
             mc_loaded = doses["mcSquare"]
+            tps_loaded = doses["tps"]
 
             # Dose inside external contour should be non-zero
             assert mc_loaded.array[2, 20, 20] > 0.0
-            # Dose outside external contour should be 0.0!
+            assert tps_loaded.array[2, 20, 20] > 0.0
+            # Dose outside external contour should be 0.0 for BOTH MC and TPS!
             assert mc_loaded.array[2, 0, 0] == 0.0
             assert mc_loaded.array[0, 20, 20] == 0.0
+            assert tps_loaded.array[2, 0, 0] == 0.0
+            assert tps_loaded.array[0, 20, 20] == 0.0
         finally:
             gamma_analysis._scan_store = orig_scan_store
             gamma_analysis._latest_job_result = orig_latest
