@@ -30,3 +30,9 @@ def cached_load(path: str) -> DoseGrid:
     if path.lower().endswith(".npz"):
         return _load_npz(path, mtime)
     return _load_rtdose(path, mtime)
+
+
+def clear_dose_cache() -> None:
+    """Flushes LRU caches for npz and rtdose loaders."""
+    _load_npz.cache_clear()
+    _load_rtdose.cache_clear()

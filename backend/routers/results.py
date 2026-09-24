@@ -28,6 +28,12 @@ router = APIRouter(prefix="/api/results", tags=["results"])
 
 _SOURCE_LABELS = {"tps": "TPS", "mcSquare": "MCsquare", "log": "Log recon"}
 
+_CACHE_BUST_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
 
 @router.get("/plan/{plan_id}", response_model=list[GammaResultResponse])
 def get_plan_results(plan_id: int, db: Session = Depends(get_db)):
@@ -104,6 +110,7 @@ async def get_dose_plane(
             "X-Max-Dose": str(grid.max_dose),
             "X-Plane-Index": str(max(0, min(z, grid.shape[0] - 1))),
             "Access-Control-Expose-Headers": "X-Rows,X-Cols,X-Max-Dose,X-Plane-Index",
+            **_CACHE_BUST_HEADERS,
         },
     )
 
@@ -134,6 +141,7 @@ async def get_ct_plane(plan_id: int, z: int, db: Session = Depends(get_db)):
             "X-Cols": str(plane.shape[1]),
             "X-Plane-Index": str(max(0, min(z, ct.shape[0] - 1))),
             "Access-Control-Expose-Headers": "X-Rows,X-Cols,X-Plane-Index",
+            **_CACHE_BUST_HEADERS,
         },
     )
 
@@ -192,6 +200,7 @@ def get_gamma_plane(
             "X-Cols": str(buf.shape[1]),
             "X-Passing-Rate": str(round(float(passing_rate), 2)),
             "Access-Control-Expose-Headers": "X-Rows,X-Cols,X-Passing-Rate",
+            **_CACHE_BUST_HEADERS,
         },
     )
 

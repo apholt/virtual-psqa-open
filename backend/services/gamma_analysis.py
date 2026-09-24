@@ -200,91 +200,134 @@ def _external_mask(target: DoseGrid, dicom_store_path: str) -> Optional[np.ndarr
     if key in _EXTERNAL_MASK_CACHE:
         return _EXTERNAL_MASK_CACHE[key]
 
-    rtstruct = None
-    for path in Path(dicom_store_path).rglob("*.dcm"):
-        try:
-            d = pydicom.dcmread(str(path), stop_before_pixels=True, force=True)
-        except Exception:
+    # Search in both dicom_store_path and its parent (in case DICOM files are organized by study/series subfolders)
+    search_dirs = [Path(dicom_store_path)]
+    parent = Path(dicom_store_path).parent
+    if parent.exists() and parent != Path(dicom_store_path) and parent.name not in ("", ".", "/"):
+        search_dirs.append(parent)
+
+    rtstruct_paths: list[str] = []
+    seen = set()
+    for sdir in search_dirs:
+        if not sdir.exists():
             continue
-        if str(getattr(d, "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.481.3":
-            rtstruct = str(path)
-            break
-    if rtstruct is None:
-        if len(_EXTERNAL_MASK_CACHE) >= _EXTERNAL_MASK_CACHE_MAX:
-            _EXTERNAL_MASK_CACHE.pop(next(iter(_EXTERNAL_MASK_CACHE)))
-        _EXTERNAL_MASK_CACHE[key] = None
-        return None
-
-    dcm = pydicom.dcmread(rtstruct, force=True)
-    names = {s.ROINumber: str(s.ROIName) for s in getattr(dcm, "StructureSetROISequence", [])}
-
-    candidate_numbers: list[int] = []
-    # 1. Prefer interpreted type EXTERNAL from RTROIObservationsSequence
-    for obs in getattr(dcm, "RTROIObservationsSequence", []):
-        if str(getattr(obs, "RTROIInterpretedType", "")).upper() == "EXTERNAL":
-            ref_num = getattr(obs, "ReferencedROINumber", None)
-            if ref_num is not None and ref_num not in candidate_numbers:
-                candidate_numbers.append(ref_num)
-
-    # 2. Exact match against common body contour names
-    for pref in ("external", "body", "patient", "skin_surface", "skin"):
-        for num, nm in names.items():
-            if nm.strip().lower() == pref and num not in candidate_numbers:
-                candidate_numbers.append(num)
-
-    # 3. Fallback to substring matching
-    for num, nm in names.items():
-        clean = nm.strip().lower()
-        if any(k in clean for k in ("external", "body", "patient")) and num not in candidate_numbers:
-            candidate_numbers.append(num)
-
-    rc = None
-    roi_contours = {
-        getattr(r, "ReferencedROINumber", None): r
-        for r in getattr(dcm, "ROIContourSequence", [])
-    }
-    for cand in candidate_numbers:
-        r = roi_contours.get(cand)
-        if r is not None and getattr(r, "ContourSequence", None):
-            rc = r
-            break
-
-    if rc is None:
-        if len(_EXTERNAL_MASK_CACHE) >= _EXTERNAL_MASK_CACHE_MAX:
-            _EXTERNAL_MASK_CACHE.pop(next(iter(_EXTERNAL_MASK_CACHE)))
-        _EXTERNAL_MASK_CACHE[key] = None
-        return None
+        for path in sorted(sdir.rglob("*.dcm")):
+            sp = str(path)
+            if sp in seen:
+                continue
+            seen.add(sp)
+            try:
+                d = pydicom.dcmread(sp, stop_before_pixels=True, force=True)
+            except Exception:
+                continue
+            if str(getattr(d, "SOPClassUID", "")) == "1.2.840.10008.5.1.4.1.1.481.3":
+                rtstruct_paths.append(sp)
 
     nzv, nyv, nxv = target.shape
     sz, sy, sx = (float(v) for v in target.spacing)
     oz, oy, ox = (float(v) for v in target.origin)
-    mask = np.zeros((nzv, nyv, nxv), dtype=bool)
-    for dslice in getattr(rc, "ContourSequence", []):
-        cd = getattr(dslice, "ContourData", None)
-        if cd is None or len(cd) < 3:
-            continue
-        xs = (np.asarray(cd[0::3], dtype=float) - ox) / sx
-        ys = (np.asarray(cd[1::3], dtype=float) - oy) / sy
-        zi = int(round((float(cd[2]) - oz) / sz))
-        if zi < 0 or zi >= nzv:
-            continue
-        xy = list(zip(xs, ys))
-        if len(xy) < 3:
-            continue
-        img = _PILImage.new("L", (nxv, nyv), 0)
-        _PILDraw.Draw(img).polygon(xy, outline=1, fill=1)
-        mask[zi] |= np.array(img, dtype=bool)
 
-    if mask.any():
-        from scipy.ndimage import binary_fill_holes
-        for z in range(nzv):
-            if mask[z].any():
-                mask[z] = binary_fill_holes(mask[z])
+    mask = None
 
+    for rtstruct in rtstruct_paths:
+        try:
+            dcm = pydicom.dcmread(rtstruct, force=True)
+        except Exception:
+            continue
+        names = {s.ROINumber: str(s.ROIName) for s in getattr(dcm, "StructureSetROISequence", [])}
+
+        candidate_numbers: list[int] = []
+        # 1. Prefer interpreted type EXTERNAL, BODY, or PATIENT from RTROIObservationsSequence
+        for obs in getattr(dcm, "RTROIObservationsSequence", []):
+            itype = str(getattr(obs, "RTROIInterpretedType", "")).upper()
+            if itype in ("EXTERNAL", "BODY", "PATIENT"):
+                ref_num = getattr(obs, "ReferencedROINumber", None)
+                nm = names.get(ref_num, "").lower()
+                # Exclude support / couch structures
+                if ref_num is not None and not any(k in nm for k in ("couch", "table", "support", "shell", "core", "fixation", "baseplate")):
+                    if ref_num not in candidate_numbers:
+                        candidate_numbers.append(ref_num)
+
+        # 2. Exact match against common body contour names
+        for pref in ("external", "body", "patient", "skin_surface", "skin", "outline", "body_contour", "patient_contour", "external_contour", "external_roi"):
+            for num, nm in names.items():
+                clean = nm.strip().lower()
+                if clean == pref and num not in candidate_numbers:
+                    candidate_numbers.append(num)
+
+        # 3. Fallback to substring matching (excluding couch/table/support structures)
+        for num, nm in names.items():
+            clean = nm.strip().lower()
+            if any(k in clean for k in ("external", "body", "patient", "outline", "skin")):
+                if not any(k in clean for k in ("couch", "table", "support", "shell", "core", "fixation", "baseplate")):
+                    if num not in candidate_numbers:
+                        candidate_numbers.append(num)
+
+        rc = None
+        roi_contours = {
+            getattr(r, "ReferencedROINumber", None): r
+            for r in getattr(dcm, "ROIContourSequence", [])
+        }
+        for cand in candidate_numbers:
+            r = roi_contours.get(cand)
+            if r is not None and getattr(r, "ContourSequence", None):
+                rc = r
+                break
+
+        if rc is None:
+            continue
+
+        cand_mask = np.zeros((nzv, nyv, nxv), dtype=bool)
+        for dslice in getattr(rc, "ContourSequence", []):
+            cd = getattr(dslice, "ContourData", None)
+            if cd is None or len(cd) < 3:
+                continue
+            xs = (np.asarray(cd[0::3], dtype=float) - ox) / sx
+            ys = (np.asarray(cd[1::3], dtype=float) - oy) / sy
+            zi = int(round((float(cd[2]) - oz) / sz))
+            if zi < 0 or zi >= nzv:
+                continue
+            xy = list(zip(xs, ys))
+            if len(xy) < 3:
+                continue
+            img = _PILImage.new("L", (nxv, nyv), 0)
+            _PILDraw.Draw(img).polygon(xy, outline=1, fill=1)
+            cand_mask[zi] |= np.array(img, dtype=bool)
+
+        if cand_mask.any():
+            from scipy.ndimage import binary_fill_holes
+            for z in range(nzv):
+                if cand_mask[z].any():
+                    cand_mask[z] = binary_fill_holes(cand_mask[z])
+            mask = cand_mask
+            break
+
+    # If no RTSTRUCT contour intersected the grid, check if planning CT exists in the store
+    if mask is None or not mask.any():
+        for sdir in search_dirs:
+            try:
+                from services.ct_backdrop import _load_ct_volume
+                ct_vol = _load_ct_volume(str(sdir))
+                if ct_vol is not None:
+                    ct_resampled = _resample_to(ct_vol, target)
+                    # Air is ~ -1000 HU; patient tissue is >= -400 HU
+                    ct_mask = ct_resampled.array > -400.0
+                    if ct_mask.any():
+                        from scipy.ndimage import binary_fill_holes
+                        for z in range(nzv):
+                            if ct_mask[z].any():
+                                ct_mask[z] = binary_fill_holes(ct_mask[z])
+                        if ct_mask.any():
+                            mask = ct_mask
+                            break
+            except Exception as e:
+                logger.debug(f"CT external derivation fallback error: {e}")
+
+    result = mask if (mask is not None and mask.any()) else None
     if len(_EXTERNAL_MASK_CACHE) >= _EXTERNAL_MASK_CACHE_MAX:
         _EXTERNAL_MASK_CACHE.pop(next(iter(_EXTERNAL_MASK_CACHE)))
-    _EXTERNAL_MASK_CACHE[key] = mask if mask.any() else None
-    return _EXTERNAL_MASK_CACHE[key]
+    _EXTERNAL_MASK_CACHE[key] = result
+    return result
 
 
 def _resample_to(src: DoseGrid, target: DoseGrid) -> DoseGrid:
@@ -390,6 +433,11 @@ def clear_dose_caches() -> None:
     _STORE_SCAN_CACHE.clear()
     _EXTERNAL_MASK_CACHE.clear()
     _RESAMPLE_CACHE.clear()
+    try:
+        from services.dose_cache import clear_dose_cache
+        clear_dose_cache()
+    except Exception:
+        pass
 
 
 def load_plan_doses(plan_id: int, db: Session) -> dict[str, DoseGrid]:
@@ -756,6 +804,8 @@ def run_gamma_analysis(
     if plan is None:
         raise ValueError(f"Plan {plan_id} not found")
 
+    clear_dose_caches()
+
     doses = load_plan_doses(plan_id, db)
     if "tps" not in doses:
         raise FileNotFoundError("TPS RTDose unavailable -- cannot run gamma analysis.")
@@ -1076,6 +1126,24 @@ def ensure_composite_gamma(plan_id: int, db: Session) -> Optional[GammaResult]:
         .all()
     )
     if not beam_results:
+        # If no gamma rows exist at all for this plan, run full gamma analysis so both
+        # per-beam and composite results are generated and stored
+        try:
+            doses = load_plan_doses(plan_id, db)
+            if "tps" in doses and "mcSquare" in doses:
+                run_gamma_analysis(plan_id, db)
+                return (
+                    db.query(GammaResult)
+                    .filter(
+                        GammaResult.plan_id == plan_id,
+                        GammaResult.comparison_type == "mcSquare_vs_TPS",
+                        GammaResult.fraction_number.is_(None),
+                        (GammaResult.field_name == "Composite") | (GammaResult.beam_number.is_(None)),
+                    )
+                    .first()
+                )
+        except Exception as exc:
+            logger.debug(f"Auto-run gamma analysis in ensure_composite_gamma failed: {exc}")
         return None
 
     try:

@@ -49,7 +49,7 @@ def gamma_2d(
 
     ref_max = float(reference.max()) if reference.size else 0.0
     if ref_max <= 0:
-        return np.full(reference.shape, np.nan, dtype=np.float32), 0.0
+        return np.full(reference.shape, np.nan, dtype=np.float32), 100.0
 
     dd_abs = (dd_percent / 100.0) * ref_max  # global normalisation
     threshold_mask = reference >= (dose_threshold_percent / 100.0) * ref_max
@@ -80,7 +80,7 @@ def gamma_2d(
     valid = gamma_map[threshold_mask]
     valid = valid[~np.isnan(valid)]
     passing_rate = (
-        float(np.sum(valid <= 1.0) / len(valid) * 100.0) if len(valid) > 0 else 0.0
+        float(np.sum(valid <= 1.0) / len(valid) * 100.0) if len(valid) > 0 else 100.0
     )
     return gamma_map.astype(np.float32), passing_rate
 
@@ -115,7 +115,7 @@ def gamma_3d(
 
     ref_max = float(reference.max()) if reference.size else 0.0
     if ref_max <= 0:
-        return np.full(reference.shape, np.nan, dtype=np.float32), 0.0
+        return np.full(reference.shape, np.nan, dtype=np.float32), 100.0
 
     dd_abs = (dd_percent / 100.0) * ref_max
     threshold_mask = reference >= (dose_threshold_percent / 100.0) * ref_max
@@ -147,7 +147,7 @@ def gamma_3d(
     valid = gamma_vol[threshold_mask]
     valid = valid[~np.isnan(valid)]
     passing_rate = (
-        float(np.sum(valid <= 1.0) / len(valid) * 100.0) if len(valid) > 0 else 0.0
+        float(np.sum(valid <= 1.0) / len(valid) * 100.0) if len(valid) > 0 else 100.0
     )
     return gamma_vol.astype(np.float32), passing_rate
 
