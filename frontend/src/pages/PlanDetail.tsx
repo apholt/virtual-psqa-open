@@ -678,11 +678,12 @@ export function PlanDetail() {
               </div>
             ) : (
               <button
-                onClick={() => handleLaunchJob("mcSquare", false)}
+                onClick={() => handleLaunchJob("mcSquare", mcCompletedBeams.length > 0)}
                 disabled={jobPolling}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-clinical-accent text-white font-medium rounded hover:bg-clinical-accent/90 transition-colors shadow-sm disabled:opacity-50"
+                title={mcCompletedBeams.length > 0 ? "Force re-simulation of all beams, discarding cached doses" : "Run MC Simulation"}
               >
-                <Play size={13} fill="currentColor" />
+                {mcCompletedBeams.length > 0 ? <RotateCcw size={12} /> : <Play size={13} fill="currentColor" />}
                 {mcCompletedBeams.length > 0 ? "Re-run MC" : "Run MC Simulation"}
               </button>
             )}
@@ -1366,11 +1367,13 @@ export function PlanDetail() {
                   </div>
                 ) : (
                   <button
-                    onClick={() => handleLaunchJob("mcSquare", false)}
+                    onClick={() => handleLaunchJob("mcSquare", mcCompletedBeams.length > 0)}
                     disabled={jobPolling}
-                    className="px-4 py-2 bg-clinical-accent text-white text-xs font-medium rounded hover:bg-clinical-accent/90 transition-colors shadow-sm"
+                    className="flex items-center gap-1.5 px-4 py-2 bg-clinical-accent text-white text-xs font-medium rounded hover:bg-clinical-accent/90 transition-colors shadow-sm"
+                    title={mcCompletedBeams.length > 0 ? "Force recalculation of all beams, discarding cached doses" : "Launch openMCsquare Simulation"}
                   >
-                    Launch openMCsquare Simulation
+                    {mcCompletedBeams.length > 0 ? <RotateCcw size={13} /> : <Play size={13} fill="currentColor" />}
+                    {mcCompletedBeams.length > 0 ? "Re-run openMCsquare Simulation" : "Launch openMCsquare Simulation"}
                   </button>
                 )}
               </div>

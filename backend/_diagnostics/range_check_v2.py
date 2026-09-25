@@ -87,7 +87,7 @@ def read_dose_volume(dose_path):
     return read_mhd(dose_path)
 
 
-def find_store(plan_id):
+def find_plan_info(plan_id: int) -> dict:
     candidates = [
         Path("./backend/data/psqa.db"),
         Path("./data/psqa.db"),
@@ -103,26 +103,38 @@ def find_store(plan_id):
                 for t in ("plans", "plan"):
                     try:
                         cur.execute(
-                            "SELECT dicom_store_path FROM %s WHERE id=?" % t,
+                            "SELECT dicom_store_path, rtplan_uid, plan_name FROM %s WHERE id=?" % t,
                             (plan_id,))
                         row = cur.fetchone()
-                        if row and row[0]:
-                            raw_path = row[0]
-                            store_candidates = [
-                                Path(raw_path),
-                                Path("backend") / raw_path,
-                                Path("..") / raw_path,
-                                db.parent / raw_path,
-                                db.parent.parent / raw_path,
-                            ]
-                            for sc in store_candidates:
-                                if sc.is_dir() and any(sc.glob("*.dcm")):
-                                    return str(sc)
+                        if row:
+                            raw_path, rtplan_uid, plan_name = row[0], row[1], row[2]
+                            resolved_store = None
+                            if raw_path:
+                                store_candidates = [
+                                    Path(raw_path),
+                                    Path("backend") / raw_path,
+                                    Path("..") / raw_path,
+                                    db.parent / raw_path,
+                                    db.parent.parent / raw_path,
+                                ]
+                                for sc in store_candidates:
+                                    if sc.exists():
+                                        resolved_store = str(sc)
+                                        break
+                            return {
+                                "store_path": resolved_store or raw_path,
+                                "rtplan_uid": rtplan_uid,
+                                "plan_name": plan_name,
+                            }
                     except sqlite3.OperationalError:
                         continue
             except Exception:
                 pass
-    return None
+    return {}
+
+
+def find_store(plan_id: int) -> Optional[str]:
+    return find_plan_info(plan_id).get("store_path")
 
 
 IGNORE_EXTS = {
@@ -133,7 +145,7 @@ IGNORE_EXTS = {
 
 def scan_store_dicoms(store_path: str):
     p = Path(store_path)
-    files_to_check: List[Path] = []
+    files_to_check = []
 
     if p.is_file():
         files_to_check.append(p)
@@ -177,9 +189,12 @@ def scan_store_dicoms(store_path: str):
             cat_name = mod if mod else (sop if sop else "Unknown")
             categorized["summary"][cat_name] = categorized["summary"].get(cat_name, 0) + 1
 
+            if sop == "1.2.840.10008.5.1.4.1.1.481.9" or mod == "RTRECORD":
+                continue
+
             if (
-                sop in (RTIONPLAN_UID, "1.2.840.10008.5.1.4.1.1.481.5", "1.2.840.10008.5.1.4.1.1.481.9")
-                or "PLAN" in mod
+                sop in (RTIONPLAN_UID, "1.2.840.10008.5.1.4.1.1.481.5")
+                or mod in ("RTPLAN", "PLAN")
                 or hasattr(d, "IonBeamSequence")
                 or hasattr(d, "BeamSequence")
             ):
@@ -201,9 +216,11 @@ def scan_store_dicoms(store_path: str):
                     d = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
                     sop = str(getattr(d, "SOPClassUID", ""))
                     mod = str(getattr(d, "Modality", "")).upper()
+                    if sop == "1.2.840.10008.5.1.4.1.1.481.9" or mod == "RTRECORD":
+                        continue
                     if (
                         sop in (RTIONPLAN_UID, "1.2.840.10008.5.1.4.1.1.481.5")
-                        or "PLAN" in mod
+                        or mod in ("RTPLAN", "PLAN")
                         or hasattr(d, "IonBeamSequence")
                         or hasattr(d, "BeamSequence")
                     ):
@@ -217,15 +234,20 @@ def scan_store_dicoms(store_path: str):
     return categorized
 
 
-def load_rtplan_beams(categorized: dict) -> Tuple[Dict[int, dict], Optional[Path]]:
-    best_beams = {}
-    best_plan_file = None
-    best_treatment_count = -1
+def load_rtplan_beams(
+    categorized: dict,
+    target_uid: Optional[str] = None,
+    target_name: Optional[str] = None,
+) -> Tuple[Dict[int, dict], Optional[Path], Optional[object]]:
+    valid_plans = []
 
     for f, d in categorized["plans"]:
         seq = getattr(d, "IonBeamSequence", None) or getattr(d, "BeamSequence", None)
         if not seq:
             continue
+
+        uid = str(getattr(d, "SOPInstanceUID", ""))
+        label = str(getattr(d, "RTPlanLabel", "") or getattr(d, "RTPlanName", "") or f.stem)
 
         plan_beams = {}
         treatment_beams = 0
@@ -271,22 +293,71 @@ def load_rtplan_beams(categorized: dict) -> Tuple[Dict[int, dict], Optional[Path
 
             plan_beams[bn] = dict(name=name, gantry=gantry, iso=iso)
 
-        if treatment_beams > best_treatment_count or (not best_beams and plan_beams):
-            best_beams = plan_beams
-            best_plan_file = f
-            best_treatment_count = treatment_beams
+        valid_plans.append({
+            "file": f,
+            "dcm": d,
+            "uid": uid,
+            "label": label,
+            "beams": plan_beams,
+            "treatment_beams": treatment_beams,
+        })
 
-    return best_beams, best_plan_file
+    if not valid_plans:
+        return {}, None, None
+
+    chosen = None
+
+    if target_uid:
+        chosen = next((p for p in valid_plans if p["uid"] == target_uid), None)
+
+    if not chosen and target_name:
+        chosen = next(
+            (p for p in valid_plans if target_name.lower() in p["label"].lower() or target_name.lower() in p["file"].name.lower()),
+            None
+        )
+
+    if not chosen:
+        ref_uids = set()
+        for _, dd in categorized.get("doses", []):
+            rseq = getattr(dd, "ReferencedRTPlanSequence", None)
+            if rseq and len(rseq) > 0 and hasattr(rseq[0], "ReferencedSOPInstanceUID"):
+                ref_uids.add(str(rseq[0].ReferencedSOPInstanceUID))
+        if ref_uids:
+            dose_matches = [p for p in valid_plans if p["uid"] in ref_uids]
+            if dose_matches:
+                dose_matches.sort(key=lambda p: p["treatment_beams"], reverse=True)
+                chosen = dose_matches[0]
+
+    if not chosen:
+        valid_plans.sort(key=lambda p: p["treatment_beams"], reverse=True)
+        chosen = valid_plans[0]
+
+    if len(valid_plans) > 1:
+        print(f"\nNOTE: Found {len(valid_plans)} RTPLAN(s) under search path:")
+        for idx, vp in enumerate(valid_plans, 1):
+            is_active = (vp["file"] == chosen["file"])
+            marker = " -> [ACTIVE]" if is_active else "    "
+            print(f"{marker} [{idx}] {vp['file'].name} | Label: '{vp['label']}' | Treatment Fields: {vp['treatment_beams']} | UID: {vp['uid'][:32]}...")
+        if not target_uid and not target_name:
+            print("  Hint: Use Option 3 ('python range_check_v2.py <plan_id>') or pass --plan-name to select a specific plan.\n")
+
+    return chosen["beams"], chosen["file"], chosen["dcm"]
 
 
-def load_tps_beams(categorized: dict) -> List[dict]:
-    import re
+def load_tps_beams(categorized: dict, active_plan_uid: Optional[str] = None) -> List[dict]:
     out = []
     for f, _ in categorized["doses"]:
         try:
             full_d = pydicom.dcmread(str(f), force=True)
             if str(getattr(full_d, "DoseSummationType", "")).upper() != "BEAM":
                 continue
+
+            if active_plan_uid:
+                ref_seq = getattr(full_d, "ReferencedRTPlanSequence", None)
+                if ref_seq and len(ref_seq) > 0 and hasattr(ref_seq[0], "ReferencedSOPInstanceUID"):
+                    dose_plan_uid = str(ref_seq[0].ReferencedSOPInstanceUID)
+                    if dose_plan_uid != active_plan_uid:
+                        continue
             beam_no = None
             try:
                 beam_no = int(
@@ -402,29 +473,39 @@ def main():
                     help="Path directly to DICOM store containing RTPLAN and RTDOSE files")
     ap.add_argument("--plan-dir", default=None,
                     help="Path directly to plan result folder (e.g. data/results/plan_1)")
+    ap.add_argument("--plan-name", default=None,
+                    help="Specific plan name or label if store contains multiple plans")
     ap.add_argument("--results", default=None,
                     help="Base results directory (e.g. data/results or backend/data/results)")
     ap.add_argument("--floor-frac", type=float, default=0.05,
                     help="Absolute dose floor as fraction of TPS beam max (default: 0.05)")
     args = ap.parse_args()
 
+    plan_id = args.plan_id
+    if plan_id is None and args.plan_dir:
+        import re
+        m = re.search(r"plan[_\-](\d+)", str(args.plan_dir))
+        if m:
+            plan_id = int(m.group(1))
+
+    plan_info = find_plan_info(plan_id) if plan_id is not None else {}
+
     # Resolve store
     store = args.store
-    if store is None and args.plan_id is not None:
-        store = find_store(args.plan_id)
+    if store is None and plan_info.get("store_path"):
+        store = plan_info["store_path"]
     if store is None and args.plan_dir:
-        # Check if DICOM store or files are inside or adjacent to plan_dir
         pd = Path(args.plan_dir)
-        if any(pd.glob("*.dcm")):
+        if pd.is_dir():
             store = str(pd)
     if store is None:
-        fail("Could not resolve DICOM store. Please pass --store /path/to/dicom_folder")
+        fail("Could not resolve DICOM store. Please pass --store /path/to/dicom_folder or plan_id")
 
     # Resolve plan_dir
     plan_dir = None
     if args.plan_dir:
         plan_dir = Path(args.plan_dir)
-    elif args.plan_id is not None:
+    elif plan_id is not None:
         res_dirs = [args.results] if args.results else [
             "./data/results",
             "./backend/data/results",
@@ -436,7 +517,7 @@ def main():
         ]
         for rd in res_dirs:
             if rd and Path(rd).is_dir():
-                cand = Path(rd) / f"plan_{args.plan_id}"
+                cand = Path(rd) / f"plan_{plan_id}"
                 if cand.is_dir():
                     if any(cand.rglob("Dose_Beam*.mhd")) or any(cand.rglob("mc_dose_beam*.npz")):
                         plan_dir = cand
@@ -471,7 +552,12 @@ def main():
         print("=" * 80)
         sys.exit(1)
 
-    plan_beams, plan_file = load_rtplan_beams(categorized)
+    target_uid = plan_info.get("rtplan_uid")
+    plan_beams, plan_file, plan_dcm = load_rtplan_beams(
+        categorized,
+        target_uid=target_uid,
+        target_name=args.plan_name,
+    )
     if not plan_beams or not plan_file:
         fail("No valid beam sequences could be parsed from the RTPLAN file(s)")
 
@@ -483,7 +569,8 @@ def main():
     if not mc_files:
         fail(f"No Dose_Beam*.mhd or mc_dose_beam*.npz found under {plan_dir}")
 
-    tps_beams = load_tps_beams(categorized)
+    active_uid = str(getattr(plan_dcm, "SOPInstanceUID", "")) if plan_dcm else None
+    tps_beams = load_tps_beams(categorized, active_plan_uid=active_uid)
     if not tps_beams:
         fail(f"No BEAM RTDose found in {store}")
 
