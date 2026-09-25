@@ -10,11 +10,13 @@ Usage:
   python check_table_dilation.py <plan_id>
   python check_table_dilation.py --store /path/to/dicom_store
   python check_table_dilation.py --store /path/to/dicom_store --plan-dir /path/to/results/plan_X
+  python check_table_dilation.py --store /path/to/RTPLAN.dcm
 """
 
 import argparse
 import math
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -30,8 +32,14 @@ except ImportError as e:
     print(f"FATAL: Missing dependency: {e}")
     sys.exit(2)
 
-RTDOSE_UID = "1.2.840.10008.5.1.4.1.1.481.2"
+IGNORE_EXTS = {
+    ".raw", ".mhd", ".txt", ".json", ".npz", ".py", ".png", ".jpg",
+    ".jpeg", ".csv", ".log", ".sh", ".bat", ".exe", ".dll", ".so", ".pyc"
+}
+
 RTIONPLAN_UID = "1.2.840.10008.5.1.4.1.1.481.8"
+RTPLAN_UID = "1.2.840.10008.5.1.4.1.1.481.5"
+RTDOSE_UID = "1.2.840.10008.5.1.4.1.1.481.2"
 RTSTRUCT_UID = "1.2.840.10008.5.1.4.1.1.481.3"
 CT_IMAGE_UID = "1.2.840.10008.5.1.4.1.1.2"
 
@@ -72,7 +80,7 @@ def find_store(plan_id: int) -> Optional[str]:
                                 db.parent.parent / raw_path,
                             ]
                             for sc in store_candidates:
-                                if sc.is_dir() and any(sc.glob("*.dcm")):
+                                if sc.exists():
                                     return str(sc)
                     except sqlite3.OperationalError:
                         continue
@@ -127,25 +135,118 @@ def read_dose_volume(dose_path: Path):
     return read_mhd(dose_path)
 
 
-def load_rtplan_beams(store: str) -> Dict[int, dict]:
-    out = {}
-    for f in sorted(Path(store).glob("*.dcm")):
+def scan_store_dicoms(store_path: str):
+    """
+    Recursively inspects store_path and categorizes all DICOM files by modality and SOP Class UID.
+    Handles single files, directories, nested series folders, and files without extensions.
+    """
+    p = Path(store_path)
+    files_to_check: List[Path] = []
+
+    if p.is_file():
+        files_to_check.append(p)
+        if p.parent.is_dir():
+            for sibling in p.parent.iterdir():
+                if sibling.is_file() and sibling != p and sibling.suffix.lower() not in IGNORE_EXTS:
+                    files_to_check.append(sibling)
+    elif p.is_dir():
+        for f in p.rglob("*"):
+            if f.is_file() and not f.name.startswith("."):
+                if f.suffix.lower() not in IGNORE_EXTS:
+                    files_to_check.append(f)
+    else:
+        return {"plans": [], "doses": [], "structs": [], "cts": [], "summary": {}}
+
+    seen = set()
+    unique_files = []
+    for f in files_to_check:
         try:
-            d = pydicom.dcmread(str(f), stop_before_pixels=True)
+            rf = f.resolve()
+            if rf not in seen:
+                seen.add(rf)
+                unique_files.append(f)
+        except Exception:
+            unique_files.append(f)
+
+    categorized = {
+        "plans": [],
+        "doses": [],
+        "structs": [],
+        "cts": [],
+        "summary": {},
+    }
+
+    for f in unique_files:
+        try:
+            d = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
+            sop = str(getattr(d, "SOPClassUID", ""))
+            mod = str(getattr(d, "Modality", "")).upper()
+
+            cat_name = mod if mod else (sop if sop else "Unknown")
+            categorized["summary"][cat_name] = categorized["summary"].get(cat_name, 0) + 1
+
+            if (
+                sop in (RTIONPLAN_UID, RTPLAN_UID, "1.2.840.10008.5.1.4.1.1.481.9")
+                or "PLAN" in mod
+                or hasattr(d, "IonBeamSequence")
+                or hasattr(d, "BeamSequence")
+            ):
+                categorized["plans"].append((f, d))
+            elif sop == RTDOSE_UID or mod == "RTDOSE":
+                categorized["doses"].append((f, d))
+            elif sop == RTSTRUCT_UID or mod == "RTSTRUCT":
+                categorized["structs"].append((f, d))
+            elif sop == CT_IMAGE_UID or mod == "CT":
+                categorized["cts"].append((f, d))
         except Exception:
             continue
-        mod = str(getattr(d, "Modality", "")).upper()
-        if getattr(d, "SOPClassUID", "") != RTIONPLAN_UID and mod != "RTPLAN":
-            continue
+
+    # Fallback: if no plans found in current folder, check parent directory if it was a subfolder
+    if not categorized["plans"] and p.is_dir() and p.parent.is_dir() and p.parent != p:
+        parent_plans = []
+        for f in p.parent.iterdir():
+            if f.is_file() and f.suffix.lower() not in IGNORE_EXTS:
+                try:
+                    d = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
+                    sop = str(getattr(d, "SOPClassUID", ""))
+                    mod = str(getattr(d, "Modality", "")).upper()
+                    if (
+                        sop in (RTIONPLAN_UID, RTPLAN_UID)
+                        or "PLAN" in mod
+                        or hasattr(d, "IonBeamSequence")
+                        or hasattr(d, "BeamSequence")
+                    ):
+                        parent_plans.append((f, d))
+                except Exception:
+                    continue
+        if parent_plans:
+            print(f"NOTE: Found RTPLAN in parent directory '{p.parent}'. Including it in search.")
+            categorized["plans"].extend(parent_plans)
+
+    return categorized
+
+
+def load_rtplan_beams(categorized: dict) -> Tuple[Dict[int, dict], Optional[Path]]:
+    best_beams = {}
+    best_plan_file = None
+    best_treatment_count = -1
+
+    for f, d in categorized["plans"]:
         seq = getattr(d, "IonBeamSequence", None) or getattr(d, "BeamSequence", None)
         if not seq:
             continue
+
+        plan_beams = {}
+        treatment_beams = 0
         for b in seq:
-            bn = int(b.BeamNumber)
-            name = str(b.get("BeamName", "") or "")
-            cps = getattr(b, "IonControlPointSequence", None) or getattr(
-                b, "ControlPointSequence", []
-            )
+            try:
+                bn = int(getattr(b, "BeamNumber", len(plan_beams) + 1))
+            except (TypeError, ValueError):
+                bn = len(plan_beams) + 1
+
+            name = str(b.get("BeamName", "") or b.get("IonBeamName", "") or f"Beam_{bn}")
+            cps = getattr(b, "IonControlPointSequence", None) or getattr(b, "ControlPointSequence", [])
+
             gantry = None
             iso = None
             for cp in cps:
@@ -161,47 +262,81 @@ def load_rtplan_beams(store: str) -> Dict[int, dict]:
                         pass
                 if gantry is not None and iso is not None:
                     break
-            out[bn] = dict(name=name, gantry=gantry, iso=iso)
-        if out:
-            break
-    return out
+
+            if gantry is None and hasattr(b, "GantryAngle"):
+                try:
+                    gantry = float(b.GantryAngle)
+                except (TypeError, ValueError):
+                    pass
+            if iso is None and hasattr(b, "IsocenterPosition"):
+                try:
+                    iso = [float(v) for v in b.IsocenterPosition]
+                except (TypeError, ValueError):
+                    pass
+
+            deliv_type = str(getattr(b, "TreatmentDeliveryType", "TREATMENT")).upper()
+            if deliv_type != "SETUP":
+                treatment_beams += 1
+
+            plan_beams[bn] = dict(name=name, gantry=gantry, iso=iso, dcm_beam=b)
+
+        if treatment_beams > best_treatment_count or (not best_beams and plan_beams):
+            best_beams = plan_beams
+            best_plan_file = f
+            best_treatment_count = treatment_beams
+
+    return best_beams, best_plan_file
 
 
-def load_tps_beams(store: str) -> List[dict]:
+def load_tps_beams(categorized: dict) -> List[dict]:
     out = []
-    for f in sorted(Path(store).glob("*.dcm")):
+    for f, _ in categorized["doses"]:
         try:
-            d = pydicom.dcmread(str(f))
-        except Exception:
-            continue
-        if getattr(d, "SOPClassUID", "") != RTDOSE_UID:
-            continue
-        if str(getattr(d, "DoseSummationType", "")).upper() != "BEAM":
-            continue
-        try:
-            beam_no = int(
-                d.ReferencedRTPlanSequence[0]
-                .ReferencedFractionGroupSequence[0]
-                .ReferencedBeamSequence[0]
-                .ReferencedBeamNumber
-            )
-        except Exception:
+            full_d = pydicom.dcmread(str(f), force=True)
+            if str(getattr(full_d, "DoseSummationType", "")).upper() != "BEAM":
+                continue
             beam_no = None
-        arr = d.pixel_array.astype(np.float32) * float(d.DoseGridScaling)
-        ipp = [float(v) for v in d.ImagePositionPatient]
-        prow = float(d.PixelSpacing[0])
-        pcol = float(d.PixelSpacing[1])
-        gfov = np.array([float(v) for v in d.GridFrameOffsetVector])
-        out.append(
-            dict(
+            try:
+                beam_no = int(
+                    full_d.ReferencedRTPlanSequence[0]
+                    .ReferencedFractionGroupSequence[0]
+                    .ReferencedBeamSequence[0]
+                    .ReferencedBeamNumber
+                )
+            except Exception:
+                pass
+            if beam_no is None and hasattr(full_d, "ReferencedBeamNumber"):
+                try:
+                    beam_no = int(full_d.ReferencedBeamNumber)
+                except Exception:
+                    pass
+            if beam_no is None:
+                match = re.search(r'beam[_\s\-]*(\d+)', f.name, re.IGNORECASE) or re.search(
+                    r'beam[_\s\-]*(\d+)', getattr(full_d, "SeriesDescription", ""), re.IGNORECASE
+                )
+                if match:
+                    beam_no = int(match.group(1))
+
+            scaling = float(getattr(full_d, "DoseGridScaling", 1.0))
+            arr = full_d.pixel_array.astype(np.float32) * scaling
+            ipp = [float(v) for v in full_d.ImagePositionPatient]
+            prow = float(full_d.PixelSpacing[0])
+            pcol = float(full_d.PixelSpacing[1])
+            if hasattr(full_d, "GridFrameOffsetVector"):
+                gfov = np.array([float(v) for v in full_d.GridFrameOffsetVector])
+            else:
+                gfov = np.arange(arr.shape[0]) * float(getattr(full_d, "SliceThickness", 2.0))
+
+            out.append(dict(
                 beam=beam_no,
                 file=f.name,
                 array=arr,
                 xs=ipp[0] + np.arange(arr.shape[2]) * pcol,
                 ys=ipp[1] + np.arange(arr.shape[1]) * prow,
                 zs=ipp[2] + gfov,
-            )
-        )
+            ))
+        except Exception:
+            continue
     return out
 
 
@@ -212,36 +347,40 @@ def beam_dir(gantry_deg: float) -> np.ndarray:
     return np.array([-math.sin(g), math.cos(g), 0.0])
 
 
-def load_raw_ct_geometry(store: str):
-    slices = []
-    for p in sorted(Path(store).glob("*.dcm")):
-        try:
-            d = pydicom.dcmread(str(p), stop_before_pixels=True)
-        except Exception:
-            continue
-        if getattr(d, "SOPClassUID", "") == CT_IMAGE_UID:
-            slices.append(d)
-    if not slices:
-        return None, None, None
-    slices.sort(key=lambda d: float(d.ImagePositionPatient[2]))
-    d0 = slices[0]
-    ipp = [float(d0.ImagePositionPatient[0]), float(d0.ImagePositionPatient[1]), float(d0.ImagePositionPatient[2])]
-    prow, pcol = float(d0.PixelSpacing[0]), float(d0.PixelSpacing[1])
-    dz = float(slices[1].ImagePositionPatient[2]) - float(slices[0].ImagePositionPatient[2]) if len(slices) > 1 else 2.0
-    # Shape is (Rows, Columns, Slices) = (Y, X, Z)
-    grid_size = (int(d0.Rows), int(d0.Columns), len(slices))
-    return grid_size, ipp, (pcol, prow, dz)
+def load_raw_ct_geometry(categorized: dict, plan_dir: Optional[Path] = None):
+    # 1. CT slices from DICOM store
+    if categorized["cts"]:
+        slices = [pydicom.dcmread(str(f), stop_before_pixels=True, force=True) for f, _ in categorized["cts"]]
+        slices.sort(key=lambda d: float(d.ImagePositionPatient[2]))
+        d0 = slices[0]
+        ipp = [float(d0.ImagePositionPatient[0]), float(d0.ImagePositionPatient[1]), float(d0.ImagePositionPatient[2])]
+        prow, pcol = float(d0.PixelSpacing[0]), float(d0.PixelSpacing[1])
+        dz = float(slices[1].ImagePositionPatient[2]) - float(slices[0].ImagePositionPatient[2]) if len(slices) > 1 else 2.0
+        grid_size = (int(d0.Rows), int(d0.Columns), len(slices))
+        return grid_size, ipp, (pcol, prow, dz)
+
+    # 2. Fallback: CT.mhd from plan results directory
+    if plan_dir:
+        ct_mhds = list(plan_dir.rglob("CT.mhd"))
+        if ct_mhds:
+            ct_mhd = ct_mhds[0]
+            arr, origin, spacing = read_mhd(ct_mhd)
+            nz, ny, nx = arr.shape
+            ipp = [origin[0], origin[1], origin[2]]
+            ps = [spacing[0], spacing[1], spacing[2]]
+            return (ny, nx, nz), ipp, ps
+
+    return None, None, None
 
 
-def load_rtstruct(store: str) -> Optional[Path]:
-    for p in sorted(Path(store).glob("*.dcm")):
-        try:
-            d = pydicom.dcmread(str(p), stop_before_pixels=True)
-            if getattr(d, "SOPClassUID", "") == RTSTRUCT_UID:
-                return p
-        except Exception:
-            continue
-    return None
+def load_rtstruct(categorized: dict) -> Optional[Path]:
+    if not categorized["structs"]:
+        return None
+    for f, d in categorized["structs"]:
+        names = [str(s.ROIName).lower() for s in getattr(d, "StructureSetROISequence", [])]
+        if any("couch" in n or "shell" in n or "table" in n or "qfix" in n for n in names):
+            return f
+    return categorized["structs"][0][0]
 
 
 def rasterize_roi(rc, grid_size, ipp, ps) -> np.ndarray:
@@ -324,7 +463,6 @@ def measure_dose_range_shift(mcf: Path, tps: dict, pb: dict) -> Optional[float]:
         mc_raw, mc_o, mc_sp = read_dose_volume(mcf)
         mc = np.ascontiguousarray(np.flip(np.flip(mc_raw, 2), 1))
 
-        # Sample on TPS grid
         ox, oy, oz = mc_o
         sx, sy, sz = mc_sp
         zi = (tps["zs"] - oz) / sz
@@ -361,7 +499,7 @@ def main():
         description="Check and simulate couch wall dilation values for posterior beams."
     )
     parser.add_argument("plan_id", type=int, nargs="?", default=None, help="Plan ID in database")
-    parser.add_argument("--store", default=None, help="Path to DICOM store directory")
+    parser.add_argument("--store", default=None, help="Path to DICOM store directory or RTPLAN file")
     parser.add_argument("--plan-dir", default=None, help="Path to plan results directory")
     parser.add_argument("--beam", type=int, default=None, help="Specific beam number to check")
     args = parser.parse_args()
@@ -371,26 +509,64 @@ def main():
         store = find_store(args.plan_id)
     if store is None and args.plan_dir:
         pd = Path(args.plan_dir)
-        if any(pd.glob("*.dcm")):
+        if pd.is_dir():
+            # Check if DICOM store or files exist in or around plan_dir
             store = str(pd)
     if store is None:
-        fail("Could not find DICOM store. Specify with --store /path/to/dicom")
+        fail("Could not find DICOM store. Specify with --store /path/to/dicom_folder or pass <plan_id>")
 
-    print(f"DICOM Store: {store}")
-    plan_beams = load_rtplan_beams(store)
-    if not plan_beams:
-        fail("No RTPLAN found in store")
+    store_path = os.path.abspath(os.path.expanduser(store))
+    print(f"Scanning DICOM Store: {store_path}")
 
-    rtstruct_path = load_rtstruct(store)
+    categorized = scan_store_dicoms(store_path)
+
+    n_plans = len(categorized["plans"])
+    n_doses = len(categorized["doses"])
+    n_structs = len(categorized["structs"])
+    n_cts = len(categorized["cts"])
+
+    print(f"Discovered DICOM objects: {n_plans} RTPlan(s), {n_doses} RTDose(s), {n_structs} RTStruct(s), {n_cts} CT slice(s)")
+
+    if n_plans == 0:
+        print("\n" + "=" * 80)
+        print(f"ERROR: No RTPLAN file found in '{store_path}'.")
+        print("=" * 80)
+        if categorized["summary"]:
+            print("Files found in this directory breakdown:")
+            for mod_name, count in sorted(categorized["summary"].items()):
+                print(f"  • {mod_name}: {count} file(s)")
+        else:
+            print("No readable DICOM files were discovered under this path.")
+        print("\nTroubleshooting:")
+        print("  1. Verify your DICOM export includes the RTPLAN (RP) file.")
+        print("  2. If the plan is in a separate folder, specify: --store /path/to/plan_folder")
+        print("  3. You can also pass the RTPLAN file directly: --store /path/to/RP.dcm")
+        print("=" * 80)
+        sys.exit(1)
+
+    plan_beams, plan_file = load_rtplan_beams(categorized)
+    if not plan_beams or not plan_file:
+        fail("No valid beam sequences could be parsed from the RTPLAN file(s)")
+
+    print(f"Active RTPLAN: {plan_file.name} (Fields: {len(plan_beams)})")
+
+    # Locate results folder
+    plan_dir = None
+    if args.plan_dir:
+        plan_dir = Path(args.plan_dir)
+    elif args.plan_id is not None:
+        plan_dir = find_plan_results(args.plan_id)
+
+    rtstruct_path = load_rtstruct(categorized)
     if not rtstruct_path:
-        fail("No RTSTRUCT found in store")
-    print(f"RTSTRUCT:    {rtstruct_path.name}")
+        fail("No RTSTRUCT found in store (needed for couch contours)")
+    print(f"RTSTRUCT:     {rtstruct_path.name}")
 
-    grid_size, ipp, ps = load_raw_ct_geometry(store)
+    grid_size, ipp, ps = load_raw_ct_geometry(categorized, plan_dir=plan_dir)
     if not grid_size:
-        fail("Could not load CT image series geometry from store")
+        fail("Could not load CT geometry (no CT slices in store and no CT.mhd in plan-dir)")
     ny, nx, nz = grid_size
-    print(f"CT Geometry: Grid=(Y={ny}, X={nx}, Z={nz})  PixelSpacing=({ps[0]:.2f}, {ps[1]:.2f}) mm  SliceThickness={ps[2]:.2f} mm")
+    print(f"CT Geometry:  Grid=(Y={ny}, X={nx}, Z={nz})  PixelSpacing=({ps[0]:.2f}, {ps[1]:.2f}) mm  SliceThickness={ps[2]:.2f} mm")
 
     shells, cores, ext = get_couch_contours(rtstruct_path)
     if not shells:
@@ -404,14 +580,12 @@ def main():
     for name, rc in cores:
         print(f"  • Core:  '{name}' (Air, -1000 HU)")
 
-    # Rasterize base masks
     print("\nRasterizing couch contours...")
     raw_shells = [(name, rasterize_roi(rc, grid_size, ipp, ps), dens) for name, rc, dens in shells]
     core_mask = np.zeros(grid_size, dtype=bool)
     for name, rc in cores:
         core_mask |= rasterize_roi(rc, grid_size, ipp, ps)
 
-    # Determine couch z-bounds
     all_shell_mask = np.zeros(grid_size, dtype=bool)
     for _, smask, _ in raw_shells:
         all_shell_mask |= smask
@@ -425,14 +599,7 @@ def main():
     else:
         couch_z_mid_mm = None
 
-    # Check for doses if available
-    plan_dir = None
-    if args.plan_dir:
-        plan_dir = Path(args.plan_dir)
-    elif args.plan_id is not None:
-        plan_dir = find_plan_results(args.plan_id)
-
-    tps_beams = load_tps_beams(store) if plan_dir else []
+    tps_beams = load_tps_beams(categorized) if plan_dir else []
     mc_files = sorted(plan_dir.rglob("Dose_Beam*.mhd")) if plan_dir else []
     if not mc_files and plan_dir:
         mc_files = sorted(plan_dir.rglob("mc_dose_beam*.npz"))
@@ -456,14 +623,12 @@ def main():
         print(f"BEAM {bn}: {pb['name']} (Gantry {gantry:.1f}°) — {'POSTERIOR (Enters through Couch)' if is_posterior else 'Anterior/Oblique'}")
         print(f"Isocenter: ({iso[0]:.1f}, {iso[1]:.1f}, {iso[2]:.1f}) mm  Travel Dir: ({d[0]:.3f}, {d[1]:.3f}, {d[2]:.3f})")
 
-        # Check if isocenter Z lies inside couch Z
         eval_z = iso[2]
         if len(couch_z_indices) > 0 and (eval_z < couch_z_min_mm or eval_z > couch_z_max_mm):
             print(f"NOTE: Isocenter Z ({eval_z:.1f} mm) is outside the couch Z range ({couch_z_min_mm:.1f}..{couch_z_max_mm:.1f} mm).")
             print(f"      Evaluating couch ray at representative couch slice Z={couch_z_mid_mm:.1f} mm.")
             eval_z = couch_z_mid_mm
 
-        # Measure current range error if doses exist
         range_error_mm = None
         if tps_beams and mc_files:
             mcf = next((m for m in mc_files if str(bn) in m.stem), None)
@@ -493,7 +658,6 @@ def main():
         results = []
 
         for dil in candidate_dilations:
-            # Replicate ct_density_override.py
             density_vol = np.zeros(grid_size, dtype=np.float32)
 
             total_voxels = 0
@@ -504,7 +668,6 @@ def main():
                 density_vol[m] = float(dens)
                 total_voxels += int(m.sum())
 
-            # Carve air cores
             density_vol[core_mask] = 0.0
 
             # Transpose (Y, X, Z) -> (Z, Y, X) for map_coordinates

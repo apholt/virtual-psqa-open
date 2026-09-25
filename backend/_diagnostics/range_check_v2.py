@@ -25,6 +25,7 @@
 
 import argparse
 import math
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -124,26 +125,121 @@ def find_store(plan_id):
     return None
 
 
-def load_rtplan_beams(store):
-    for f in sorted(Path(store).glob("*.dcm")):
+IGNORE_EXTS = {
+    ".raw", ".mhd", ".txt", ".json", ".npz", ".py", ".png", ".jpg",
+    ".jpeg", ".csv", ".log", ".sh", ".bat", ".exe", ".dll", ".so", ".pyc"
+}
+
+
+def scan_store_dicoms(store_path: str):
+    p = Path(store_path)
+    files_to_check: List[Path] = []
+
+    if p.is_file():
+        files_to_check.append(p)
+        if p.parent.is_dir():
+            for sibling in p.parent.iterdir():
+                if sibling.is_file() and sibling != p and sibling.suffix.lower() not in IGNORE_EXTS:
+                    files_to_check.append(sibling)
+    elif p.is_dir():
+        for f in p.rglob("*"):
+            if f.is_file() and not f.name.startswith("."):
+                if f.suffix.lower() not in IGNORE_EXTS:
+                    files_to_check.append(f)
+    else:
+        return {"plans": [], "doses": [], "structs": [], "cts": [], "summary": {}}
+
+    seen = set()
+    unique_files = []
+    for f in files_to_check:
         try:
-            d = pydicom.dcmread(str(f), stop_before_pixels=True)
+            rf = f.resolve()
+            if rf not in seen:
+                seen.add(rf)
+                unique_files.append(f)
+        except Exception:
+            unique_files.append(f)
+
+    categorized = {
+        "plans": [],
+        "doses": [],
+        "structs": [],
+        "cts": [],
+        "summary": {},
+    }
+
+    for f in unique_files:
+        try:
+            d = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
+            sop = str(getattr(d, "SOPClassUID", ""))
+            mod = str(getattr(d, "Modality", "")).upper()
+
+            cat_name = mod if mod else (sop if sop else "Unknown")
+            categorized["summary"][cat_name] = categorized["summary"].get(cat_name, 0) + 1
+
+            if (
+                sop in (RTIONPLAN_UID, "1.2.840.10008.5.1.4.1.1.481.5", "1.2.840.10008.5.1.4.1.1.481.9")
+                or "PLAN" in mod
+                or hasattr(d, "IonBeamSequence")
+                or hasattr(d, "BeamSequence")
+            ):
+                categorized["plans"].append((f, d))
+            elif sop == RTDOSE_UID or mod == "RTDOSE":
+                categorized["doses"].append((f, d))
+            elif sop == "1.2.840.10008.5.1.4.1.1.481.3" or mod == "RTSTRUCT":
+                categorized["structs"].append((f, d))
+            elif sop == "1.2.840.10008.5.1.4.1.1.2" or mod == "CT":
+                categorized["cts"].append((f, d))
         except Exception:
             continue
-        if getattr(d, "SOPClassUID", "") != RTIONPLAN_UID and \
-           str(getattr(d, "Modality", "")).upper() != "RTPLAN":
-            continue
-        seq = getattr(d, "IonBeamSequence", None) or getattr(
-            d, "BeamSequence", None)
+
+    if not categorized["plans"] and p.is_dir() and p.parent.is_dir() and p.parent != p:
+        parent_plans = []
+        for f in p.parent.iterdir():
+            if f.is_file() and f.suffix.lower() not in IGNORE_EXTS:
+                try:
+                    d = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
+                    sop = str(getattr(d, "SOPClassUID", ""))
+                    mod = str(getattr(d, "Modality", "")).upper()
+                    if (
+                        sop in (RTIONPLAN_UID, "1.2.840.10008.5.1.4.1.1.481.5")
+                        or "PLAN" in mod
+                        or hasattr(d, "IonBeamSequence")
+                        or hasattr(d, "BeamSequence")
+                    ):
+                        parent_plans.append((f, d))
+                except Exception:
+                    continue
+        if parent_plans:
+            print(f"NOTE: Found RTPLAN in parent directory '{p.parent}'. Including it in search.")
+            categorized["plans"].extend(parent_plans)
+
+    return categorized
+
+
+def load_rtplan_beams(categorized: dict) -> Tuple[Dict[int, dict], Optional[Path]]:
+    best_beams = {}
+    best_plan_file = None
+    best_treatment_count = -1
+
+    for f, d in categorized["plans"]:
+        seq = getattr(d, "IonBeamSequence", None) or getattr(d, "BeamSequence", None)
         if not seq:
             continue
-        out = {}
+
+        plan_beams = {}
+        treatment_beams = 0
         for b in seq:
-            bn = int(b.BeamNumber)
-            name = str(b.get("BeamName", "") or "")
-            cps = getattr(b, "IonControlPointSequence", None) or getattr(
-                b, "ControlPointSequence", [])
-            gantry = iso = None
+            try:
+                bn = int(getattr(b, "BeamNumber", len(plan_beams) + 1))
+            except (TypeError, ValueError):
+                bn = len(plan_beams) + 1
+
+            name = str(b.get("BeamName", "") or b.get("IonBeamName", "") or f"Beam_{bn}")
+            cps = getattr(b, "IonControlPointSequence", None) or getattr(b, "ControlPointSequence", [])
+
+            gantry = None
+            iso = None
             for cp in cps:
                 if gantry is None and hasattr(cp, "GantryAngle"):
                     try:
@@ -157,39 +253,82 @@ def load_rtplan_beams(store):
                         pass
                 if gantry is not None and iso is not None:
                     break
-            out[bn] = dict(name=name, gantry=gantry, iso=iso)
-        if out:
-            return out
-    return {}
+
+            if gantry is None and hasattr(b, "GantryAngle"):
+                try:
+                    gantry = float(b.GantryAngle)
+                except (TypeError, ValueError):
+                    pass
+            if iso is None and hasattr(b, "IsocenterPosition"):
+                try:
+                    iso = [float(v) for v in b.IsocenterPosition]
+                except (TypeError, ValueError):
+                    pass
+
+            deliv_type = str(getattr(b, "TreatmentDeliveryType", "TREATMENT")).upper()
+            if deliv_type != "SETUP":
+                treatment_beams += 1
+
+            plan_beams[bn] = dict(name=name, gantry=gantry, iso=iso)
+
+        if treatment_beams > best_treatment_count or (not best_beams and plan_beams):
+            best_beams = plan_beams
+            best_plan_file = f
+            best_treatment_count = treatment_beams
+
+    return best_beams, best_plan_file
 
 
-def load_tps_beams(store):
+def load_tps_beams(categorized: dict) -> List[dict]:
+    import re
     out = []
-    for f in sorted(Path(store).glob("*.dcm")):
+    for f, _ in categorized["doses"]:
         try:
-            d = pydicom.dcmread(str(f))
-        except Exception:
-            continue
-        if getattr(d, "SOPClassUID", "") != RTDOSE_UID:
-            continue
-        if str(getattr(d, "DoseSummationType", "")).upper() != "BEAM":
-            continue
-        try:
-            beam_no = int(d.ReferencedRTPlanSequence[0]
-                          .ReferencedFractionGroupSequence[0]
-                          .ReferencedBeamSequence[0].ReferencedBeamNumber)
-        except Exception:
+            full_d = pydicom.dcmread(str(f), force=True)
+            if str(getattr(full_d, "DoseSummationType", "")).upper() != "BEAM":
+                continue
             beam_no = None
-        arr = d.pixel_array.astype(np.float32) * float(d.DoseGridScaling)
-        ipp = [float(v) for v in d.ImagePositionPatient]
-        prow = float(d.PixelSpacing[0])
-        pcol = float(d.PixelSpacing[1])
-        gfov = np.array([float(v) for v in d.GridFrameOffsetVector])
-        out.append(dict(
-            beam=beam_no, file=f.name, array=arr,
-            xs=ipp[0] + np.arange(arr.shape[2]) * pcol,
-            ys=ipp[1] + np.arange(arr.shape[1]) * prow,
-            zs=ipp[2] + gfov))
+            try:
+                beam_no = int(
+                    full_d.ReferencedRTPlanSequence[0]
+                    .ReferencedFractionGroupSequence[0]
+                    .ReferencedBeamSequence[0]
+                    .ReferencedBeamNumber
+                )
+            except Exception:
+                pass
+            if beam_no is None and hasattr(full_d, "ReferencedBeamNumber"):
+                try:
+                    beam_no = int(full_d.ReferencedBeamNumber)
+                except Exception:
+                    pass
+            if beam_no is None:
+                match = re.search(r'beam[_\s\-]*(\d+)', f.name, re.IGNORECASE) or re.search(
+                    r'beam[_\s\-]*(\d+)', getattr(full_d, "SeriesDescription", ""), re.IGNORECASE
+                )
+                if match:
+                    beam_no = int(match.group(1))
+
+            scaling = float(getattr(full_d, "DoseGridScaling", 1.0))
+            arr = full_d.pixel_array.astype(np.float32) * scaling
+            ipp = [float(v) for v in full_d.ImagePositionPatient]
+            prow = float(full_d.PixelSpacing[0])
+            pcol = float(full_d.PixelSpacing[1])
+            if hasattr(full_d, "GridFrameOffsetVector"):
+                gfov = np.array([float(v) for v in full_d.GridFrameOffsetVector])
+            else:
+                gfov = np.arange(arr.shape[0]) * float(getattr(full_d, "SliceThickness", 2.0))
+
+            out.append(dict(
+                beam=beam_no,
+                file=f.name,
+                array=arr,
+                xs=ipp[0] + np.arange(arr.shape[2]) * pcol,
+                ys=ipp[1] + np.arange(arr.shape[1]) * prow,
+                zs=ipp[2] + gfov,
+            ))
+        except Exception:
+            continue
     return out
 
 
@@ -307,13 +446,44 @@ def main():
     if plan_dir is None or not plan_dir.is_dir():
         fail("Plan results folder not found. Please pass --plan-dir /path/to/results/plan_X")
 
-    plan_beams = load_rtplan_beams(store)
+    store_path = os.path.abspath(os.path.expanduser(store))
+    print(f"Scanning DICOM Store: {store_path}")
+    categorized = scan_store_dicoms(store_path)
+
+    n_plans = len(categorized["plans"])
+    n_doses = len(categorized["doses"])
+    print(f"Discovered DICOM objects: {n_plans} RTPlan(s), {n_doses} RTDose(s)")
+
+    if n_plans == 0:
+        print("\n" + "=" * 80)
+        print(f"ERROR: No RTPLAN file found in '{store_path}'.")
+        print("=" * 80)
+        if categorized["summary"]:
+            print("Files found in this directory breakdown:")
+            for mod_name, count in sorted(categorized["summary"].items()):
+                print(f"  • {mod_name}: {count} file(s)")
+        else:
+            print("No readable DICOM files were discovered under this path.")
+        print("\nTroubleshooting:")
+        print("  1. Verify your DICOM export includes the RTPLAN (RP) file.")
+        print("  2. If the plan is in a separate folder, specify: --store /path/to/plan_folder")
+        print("  3. You can also pass the RTPLAN file directly: --store /path/to/RP.dcm")
+        print("=" * 80)
+        sys.exit(1)
+
+    plan_beams, plan_file = load_rtplan_beams(categorized)
+    if not plan_beams or not plan_file:
+        fail("No valid beam sequences could be parsed from the RTPLAN file(s)")
+
+    print(f"Active RTPLAN: {plan_file.name} (Fields: {len(plan_beams)})")
+
     mc_files = sorted(plan_dir.rglob("Dose_Beam*.mhd"))
     if not mc_files:
         mc_files = sorted(plan_dir.rglob("mc_dose_beam*.npz"))
     if not mc_files:
         fail(f"No Dose_Beam*.mhd or mc_dose_beam*.npz found under {plan_dir}")
-    tps_beams = load_tps_beams(store)
+
+    tps_beams = load_tps_beams(categorized)
     if not tps_beams:
         fail(f"No BEAM RTDose found in {store}")
 
