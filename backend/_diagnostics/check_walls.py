@@ -1,4 +1,4 @@
-"""
+r"""
 check_walls.py — print HU y-profiles from the CT.mhd MCsquare simulated on, at
 the x/z where LP's central ray crosses the couch, in the file's OWN frame (no
 un-flip). Shows whether the painted shell walls (8000/8001) actually sit on the

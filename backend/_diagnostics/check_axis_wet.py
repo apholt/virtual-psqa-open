@@ -1,4 +1,4 @@
-"""
+r"""
 check_axis_wet.py — integrate water-equivalent thickness along LP's TRUE central
 axis (through the isocenter, gantry 155) from the isocenter back to the entry
 side, for (a) the raw CT and (b) the overridden CT.mhd MCsquare simulated on.

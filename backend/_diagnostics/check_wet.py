@@ -1,4 +1,4 @@
-"""
+r"""
 check_wet.py — quantify the couch's water-equivalent thickness (WET) along the
 LP beam direction, comparing (a) the RAW CT from the DICOM store with (b) the
 overridden CT.mhd that MCsquare actually simulated on.

@@ -1,4 +1,4 @@
-"""
+r"""
 check_couch.py — verify the couch density override lands correctly on the CT.
 
 Loads the CT, applies the density override, and reports per-structure voxel
