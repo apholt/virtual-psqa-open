@@ -303,6 +303,34 @@ def _external_mask(target: DoseGrid, dicom_store_path: str) -> Optional[np.ndarr
             for z in range(nzv):
                 if cand_mask[z].any():
                     cand_mask[z] = binary_fill_holes(cand_mask[z])
+
+            # TG-218: strictly exclude couch/table support structures from the evaluation mask
+            for s_num, s_name in names.items():
+                s_clean = s_name.strip().lower()
+                is_support = any(k in s_clean for k in ("couch", "table", "support", "shell", "core", "baseplate"))
+                if not is_support:
+                    for obs in getattr(dcm, "RTROIObservationsSequence", []):
+                        if getattr(obs, "ReferencedROINumber", None) == s_num:
+                            if str(getattr(obs, "RTROIInterpretedType", "")).upper() == "SUPPORT":
+                                is_support = True
+                                break
+                if is_support:
+                    s_rc = roi_contours.get(s_num)
+                    if s_rc is not None and getattr(s_rc, "ContourSequence", None):
+                        for dslice in getattr(s_rc, "ContourSequence", []):
+                            cd = getattr(dslice, "ContourData", None)
+                            if cd is None or len(cd) < 3:
+                                continue
+                            xs = (np.asarray(cd[0::3], dtype=float) - ox) / sx
+                            ys = (np.asarray(cd[1::3], dtype=float) - oy) / sy
+                            zi = int(round((float(cd[2]) - oz) / sz))
+                            if 0 <= zi < nzv:
+                                xy = list(zip(xs, ys))
+                                if len(xy) >= 3:
+                                    img = _PILImage.new("L", (nxv, nyv), 0)
+                                    _PILDraw.Draw(img).polygon(xy, outline=1, fill=1)
+                                    s_slice = np.array(img, dtype=bool)
+                                    cand_mask[zi] &= ~s_slice
             mask = cand_mask
             break
 

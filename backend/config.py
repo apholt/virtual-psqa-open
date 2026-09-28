@@ -147,6 +147,11 @@ class Settings(BaseSettings):
     COMPLEXITY_SAS_THRESHOLD: float = 0.005
     PIPELINE_AUTO_RUN: bool = True
 
+    # Treatment couch calibration
+    COUCH_WALL_DILATION_VOX: int = 0
+    COUCH_SHELL_DENSITY_OVERRIDE: Optional[float] = None
+    COUCH_SHELL_DENSITY_SCALE: Optional[float] = None
+
 
 settings = Settings()
 

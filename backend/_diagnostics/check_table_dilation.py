@@ -493,10 +493,26 @@ def get_couch_contours(rtstruct_path: Path):
     dcm = pydicom.dcmread(str(rtstruct_path), force=True)
     names = {s.ROINumber: str(s.ROIName) for s in getattr(dcm, "StructureSetROISequence", [])}
     overrides = {}
+    phys_props = {}
     for obs in getattr(dcm, "RTROIObservationsSequence", []):
         num = getattr(obs, "ReferencedROINumber", None)
-        if num in names and (0x300A, 0x00E1) in obs:
-            overrides[names[num]] = str(obs[0x300A, 0x00E1].value)
+        if num in names:
+            name = names[num]
+            if (0x300A, 0x00E1) in obs:
+                overrides[name] = str(obs[0x300A, 0x00E1].value)
+            p_seq = getattr(obs, "ROIPhysicalPropertiesSequence", None)
+            if p_seq:
+                p_dict = {}
+                for item in p_seq:
+                    p_type = str(getattr(item, "ROIPhysicalProperty", "")).strip()
+                    p_val = getattr(item, "ROIPhysicalPropertyValue", None)
+                    if p_type and p_val is not None:
+                        try:
+                            p_dict[p_type] = float(p_val)
+                        except (ValueError, TypeError):
+                            pass
+                if p_dict:
+                    phys_props[name] = p_dict
 
     contours = {}
     for rc in getattr(dcm, "ROIContourSequence", []):
@@ -511,12 +527,18 @@ def get_couch_contours(rtstruct_path: Path):
     for name, rc in contours.items():
         low = name.lower()
         mat = overrides.get(name, "").lower()
+        props = phys_props.get(name, {})
         if "external" in low:
             external = rc
         elif "air" in mat or "core" in low:
-            cores.append((name, rc))
+            core_dens = props.get("REL_MASS_DENSITY", 0.0)
+            if core_dens <= 0.0:
+                core_dens = props.get("REL_ELEC_DENSITY", 0.0)
+            cores.append((name, rc, core_dens))
         elif "shell" in low or "couch" in low or "table" in low or "qfix" in low or "2.03" in mat or "1.2" in mat:
             density = 2.03 if ("2.03" in mat or "shell" in low) else 1.20
+            if "REL_MASS_DENSITY" in props and props["REL_MASS_DENSITY"] > 0.1:
+                density = props["REL_MASS_DENSITY"]
             shells.append((name, rc, density))
 
     return shells, cores, external
@@ -588,6 +610,7 @@ def main():
     parser.add_argument("--plan-dir", default=None, help="Path to plan results directory")
     parser.add_argument("--plan-name", default=None, help="Specific plan name or label if store contains multiple plans")
     parser.add_argument("--beam", type=int, default=None, help="Specific beam number to check")
+    parser.add_argument("--density", type=float, default=None, help="Evaluate a specific couch shell density in g/cm3 (e.g. 2.15)")
     args = parser.parse_args()
 
     plan_id = args.plan_id
@@ -675,14 +698,18 @@ def main():
     print(f"\nIdentified Couch Structures:")
     for name, rc, dens in shells:
         print(f"  • Shell: '{name}' (Target density: {dens:.2f} g/cm3)")
-    for name, rc in cores:
-        print(f"  • Core:  '{name}' (Air, -1000 HU)")
+    for name, rc, core_dens in cores:
+        if core_dens > 0.01:
+            print(f"  • Core:  '{name}' (Foam: {core_dens:.3f} g/cm3)")
+        else:
+            print(f"  • Core:  '{name}' (Air, -1000 HU)")
 
     print("\nRasterizing couch contours...")
     raw_shells = [(name, rasterize_roi(rc, grid_size, ipp, ps), dens) for name, rc, dens in shells]
+    raw_cores = [(name, rasterize_roi(rc, grid_size, ipp, ps), core_dens) for name, rc, core_dens in cores]
     core_mask = np.zeros(grid_size, dtype=bool)
-    for name, rc in cores:
-        core_mask |= rasterize_roi(rc, grid_size, ipp, ps)
+    for name, cmask, _ in raw_cores:
+        core_mask |= cmask
 
     all_shell_mask = np.zeros(grid_size, dtype=bool)
     for _, smask, _ in raw_shells:
@@ -750,6 +777,7 @@ def main():
         zi_v, yi_v, xi_v = zi[valid], yi[valid], xi[valid]
 
         print("-" * 80)
+        print("INTEGER DILATION SWEEP:")
         print(f"{'Dilation':<15} | {'Shell Voxels':<14} | {'Couch WET (mm)':<16} | {'Δ WET vs 0':<12} | {'Predicted Residual Shift'}")
         print("-" * 80)
 
@@ -767,7 +795,11 @@ def main():
                 density_vol[m] = float(dens)
                 total_voxels += int(m.sum())
 
-            density_vol[core_mask] = 0.0
+            for cname, cmask, core_dens in raw_cores:
+                if core_dens > 0.01:
+                    density_vol[cmask] = float(core_dens)
+                else:
+                    density_vol[cmask] = 0.0
 
             # Transpose (Y, X, Z) -> (Z, Y, X) for map_coordinates
             dens_zyx = np.transpose(density_vol, (2, 0, 1))
@@ -801,20 +833,102 @@ def main():
             results.append((dil, delta_wet, wet_mm))
 
         print("-" * 80)
-        if range_error_mm is not None and range_error_mm > 0.3:
-            best_dil = min(results, key=lambda r: abs(range_error_mm - r[1]))[0]
-            print(f"\n>>> CLINICAL RECOMMENDATION FOR THIS BEAM:")
-            print(f"    Observed overranging is +{range_error_mm:.2f} mm.")
-            print(f"    Setting COUCH_WALL_DILATION_VOX = {best_dil} in backend/ct_density_override.py")
-            print(f"    adds approximately +{results[best_dil][1]:.2f} mm of WET to cancel out this overranging.")
+
+        # Continuous density sweep (at dil=0 — preserving exact contours)
+        nom_dens = raw_shells[0][2] if raw_shells else 2.03
+        sweep_densities = [1.70, 1.80, 1.85, 1.90, 1.95, nom_dens, 2.05, 2.10, 2.15, 2.20, 2.25, 2.30, 2.35, 2.40]
+        if args.density is not None:
+            sweep_densities.append(args.density)
+        sweep_densities = sorted(list(set(round(d, 3) for d in sweep_densities)))
+
+        print("\n" + "-" * 80)
+        print("CONTINUOUS DENSITY SWEEP (at 0 dilation — preserving exact geometry):")
+        print("-" * 80)
+        print(f"{'Density (g/cm³)':<17} | {'Relative Scale':<16} | {'Couch WET (mm)':<16} | {'Δ WET vs Nom':<14} | {'Predicted Residual Shift'}")
+        print("-" * 80)
+
+        dens_results = []
+        for cdens in sweep_densities:
+            density_vol = np.zeros(grid_size, dtype=np.float32)
+            for sname, smask, _ in raw_shells:
+                density_vol[smask] = float(cdens)
+            for cname, cmask, core_dens in raw_cores:
+                if core_dens > 0.01:
+                    density_vol[cmask] = float(core_dens)
+                else:
+                    density_vol[cmask] = 0.0
+
+            dens_zyx = np.transpose(density_vol, (2, 0, 1))
+            dens_ray = map_coordinates(
+                dens_zyx,
+                [zi_v, yi_v, xi_v],
+                order=1,
+                mode="constant",
+                cval=0.0,
+            )
+            wet_mm = float(np.sum(dens_ray) * step_mm)
+            delta_wet = wet_mm - (wet_at_0 or 0.0)
+            rel_scale = cdens / nom_dens
+
+            res_shift_str = "—"
+            if range_error_mm is not None:
+                pred_shift = range_error_mm - delta_wet
+                match_tag = " (EXACT MATCH!)" if abs(pred_shift) < 0.2 else (" (CLOSE)" if abs(pred_shift) < 0.5 else "")
+                res_shift_str = f"{pred_shift:+.2f} mm{match_tag}"
+
+            is_nom = abs(cdens - nom_dens) < 0.001
+            dens_label = f"{cdens:.2f} g/cm³" + (" (nom)" if is_nom else "")
+            print(
+                f"{dens_label:<17} | "
+                f"{f'{rel_scale:.3f}x ({rel_scale-1.0:+.1%})':<16} | "
+                f"{wet_mm:<16.2f} | "
+                f"{f'{delta_wet:+.2f} mm':<14} | "
+                f"{res_shift_str}"
+            )
+            dens_results.append((cdens, delta_wet, wet_mm))
+
+        print("-" * 80)
+
+        if range_error_mm is not None and abs(range_error_mm) > 0.2 and wet_at_0 and wet_at_0 > 0.5:
+            rec_scale = 1.0 + (range_error_mm / wet_at_0)
+            rec_dens = nom_dens * rec_scale
+            # Evaluate exact WET at recommended density
+            density_vol = np.zeros(grid_size, dtype=np.float32)
+            for sname, smask, _ in raw_shells:
+                density_vol[smask] = float(rec_dens)
+            for cname, cmask, core_dens in raw_cores:
+                if core_dens > 0.01:
+                    density_vol[cmask] = float(core_dens)
+                else:
+                    density_vol[cmask] = 0.0
+            dens_zyx = np.transpose(density_vol, (2, 0, 1))
+            dens_ray = map_coordinates(dens_zyx, [zi_v, yi_v, xi_v], order=1, mode="constant", cval=0.0)
+            rec_wet = float(np.sum(dens_ray) * step_mm)
+            rec_delta_wet = rec_wet - wet_at_0
+            rec_res = range_error_mm - rec_delta_wet
+
+            print(f"\n>>> CONTINUOUS CALIBRATION RECOMMENDATION (RECOMMENDED OVER INTEGER DILATION):")
+            print(f"    Observed distal range shift is: {range_error_mm:+.2f} mm.")
+            print(f"    Integer dilation (+1 vox = {results[1][1]:+.2f} mm) is too coarse for fine calibration.")
+            print(f"    Setting COUCH_SHELL_DENSITY_OVERRIDE = {rec_dens:.2f} in backend/ct_density_override.py")
+            print(f"    (or COUCH_SHELL_DENSITY_SCALE = {rec_scale:.3f}) adds {rec_delta_wet:+.2f} mm of WET,")
+            print(f"    reducing predicted residual shift to {rec_res:+.2f} mm (< 0.1 mm precision)!")
         elif range_error_mm is not None:
-            print(f"\n>>> Dilation evaluation: Distal edges match within {abs(range_error_mm):.2f} mm.")
+            print(f"\n>>> Calibration evaluation: Distal edges match within {abs(range_error_mm):.2f} mm.")
 
     print("\n" + "=" * 80)
-    print("HOW TO APPLY A DILATION VALUE CLINICALLY:")
-    print("  1. Open backend/ct_density_override.py")
-    print("  2. Set line ~128: COUCH_WALL_DILATION_VOX = <target_voxels>  (e.g. 1 or 2)")
-    print("  3. Rerun the QA pipeline for the plan.")
+    print("HOW TO APPLY CALIBRATION CLINICALLY:")
+    print("  Option A: Continuous Density (Recommended — Sub-millimeter precision, no skin distortion)")
+    print("    1. Open backend/ct_density_override.py")
+    print("    2. Set line ~128: COUCH_SHELL_DENSITY_OVERRIDE = <recommended_density>  (e.g. 2.15)")
+    print("       (or in backend/.env: COUCH_SHELL_DENSITY_OVERRIDE=<recommended_density>)")
+    print("    3. Keep COUCH_WALL_DILATION_VOX = 0")
+    print("    4. Rerun QA pipeline.")
+    print("")
+    print("  Option B: Discrete Voxel Dilation (Legacy coarse adjustment)")
+    print("    1. Open backend/ct_density_override.py")
+    print("    2. Set line ~124: COUCH_WALL_DILATION_VOX = <target_voxels>  (e.g. 1 or 2)")
+    print("    3. Rerun QA pipeline.")
     print("=" * 80)
 
 

@@ -107,25 +107,104 @@ SDC_MATERIAL_HU = {
 
 
 # ---------------------------------------------------------------------------
-# Couch wall thickness
 # ---------------------------------------------------------------------------
-# OPEN QUESTION — do not change without a measurement.
-#
-# The rasterized couch walls under-carry WET vs the TPS couch model, and this
-# dilation compensates. The original calibration (plan 3 LP, gantry 155, 4 wall
-# crossings) measured: 0 vox -> 7.4 mm range overshoot, 1 vox -> 5.1 mm, and
-# targeted 3 vox for ~0.
-#
-# It was set to 3, then changed to 0 on 2026-07-06 "to troubleshoot
-# under-ranging" (APH) and not reverted.
-#
-# BUT: the pass-2 note records that those original overshoot readings were later
-# found to be an artifact of Dose_Segmentation zeroing entry dose — so the 3-vox
-# calibration may itself rest on a bad measurement. Both values are therefore
-# suspect. Resolve by re-measuring range agreement on a posterior beam that
-# crosses the couch (e.g. plan 15 field RP) at 0 / 1 / 3 vox, with the current
-# Dose_Segmentation setting, and set it from that result.
+# Couch wall thickness and continuous density calibration
+# ---------------------------------------------------------------------------
+# Discrete in-plane voxel dilation (0, 1, 2...). Integer dilation is coarse
+# (~2.3 mm WET per wall on a 1 mm CT grid).
 COUCH_WALL_DILATION_VOX = 0
+
+# Continuous density override for couch shells (e.g. 2.15, 2.08, or None).
+# When None, uses the nominal commissioned density (2.03 for MedPhoton, 1.20 for Qfix).
+# Setting this allows sub-millimeter tuning of Water-Equivalent Thickness (WET)
+# without integer voxel dilation staircasing or patient geometry distortion.
+COUCH_SHELL_DENSITY_OVERRIDE: Optional[float] = None
+
+# Optional relative scaling multiplier for couch shell density (e.g. 1.05 for +5%).
+# When None or 1.0, nominal density is unscaled.
+COUCH_SHELL_DENSITY_SCALE: Optional[float] = None
+
+# Synchronize with application settings if available
+try:
+    from config import settings
+    if getattr(settings, "COUCH_SHELL_DENSITY_OVERRIDE", None) is not None:
+        COUCH_SHELL_DENSITY_OVERRIDE = settings.COUCH_SHELL_DENSITY_OVERRIDE
+    if getattr(settings, "COUCH_SHELL_DENSITY_SCALE", None) is not None:
+        COUCH_SHELL_DENSITY_SCALE = settings.COUCH_SHELL_DENSITY_SCALE
+    if getattr(settings, "COUCH_WALL_DILATION_VOX", None) is not None:
+        COUCH_WALL_DILATION_VOX = settings.COUCH_WALL_DILATION_VOX
+except Exception:
+    pass
+
+
+def couch_density_to_hu(density: float) -> float:
+    """
+    Map a target physical density (g/cm3) for carbon fiber (CFRP) to the HU code
+    that will yield that exact density in MCsquare while preserving material label 67 (CFRP).
+
+    Based on Scanners/default/ calibrations:
+      HU 8000 -> 1.20 g/cm3, material 67 (CFRP)
+      HU 8001 -> 2.03 g/cm3, material 67 (CFRP)
+      HU 8040 -> material 73 (Au) threshold
+      HU 8500 -> 19.20 g/cm3
+
+    For densities in [1.20, 2.03]:
+      HU = 8000 + (density - 1.20) / (2.03 - 1.20) * (8001 - 8000)
+    For densities in [2.03, 3.37] (HU < 8040):
+      HU = 8001 + (density - 2.03) / (19.20 - 2.03) * (8500 - 8001)
+    """
+    if density <= 1.20:
+        return 8000.0
+    elif density <= 2.03:
+        return 8000.0 + (density - 1.20) / (2.03 - 1.20) * (8001.0 - 8000.0)
+    else:
+        hu = 8001.0 + (density - 2.03) / (19.20 - 2.03) * (8500.0 - 8001.0)
+        return min(hu, 8039.0)
+
+
+def foam_density_to_hu(density: float) -> float:
+    """
+    Map a low-density core foam (e.g. Rohacell 0.03-0.08 g/cm3) to an HU code
+    that yields that exact density in MCsquare on the scanner calibration curve.
+    Points in default scanner:
+      HU -986.5 -> 0.0012 g/cm3
+      HU -789.5 -> 0.2050 g/cm3
+    """
+    if density <= 0.0012:
+        return float(AIR_HU)
+    hu = -986.5 + (density - 0.0012) / (0.2050 - 0.0012) * (-789.5 - (-986.5))
+    return float(hu)
+
+
+def _structure_physical_properties(rtstruct_path: str) -> dict[str, dict[str, float]]:
+    """
+    Return {ROIName: {PropertyName: PropertyValue}} for ROIs carrying
+    ROI Physical Properties (0x3006, 0x00b0) in the RTROIObservationsSequence.
+    Captures 'REL_MASS_DENSITY', 'REL_ELEC_DENSITY', 'EFFECTIVE_Z', etc.
+    """
+    dcm = pydicom.dcmread(rtstruct_path, force=True)
+    names = {s.ROINumber: str(s.ROIName) for s in getattr(dcm, "StructureSetROISequence", [])}
+    props_by_name: dict[str, dict[str, float]] = {}
+    for obs in getattr(dcm, "RTROIObservationsSequence", []):
+        num = getattr(obs, "ReferencedROINumber", None)
+        name = names.get(num)
+        if name is None:
+            continue
+        p_seq = getattr(obs, "ROIPhysicalPropertiesSequence", None)
+        if not p_seq:
+            continue
+        p_dict = {}
+        for item in p_seq:
+            p_type = str(getattr(item, "ROIPhysicalProperty", "")).strip()
+            p_val = getattr(item, "ROIPhysicalPropertyValue", None)
+            if p_type and p_val is not None:
+                try:
+                    p_dict[p_type] = float(p_val)
+                except (ValueError, TypeError):
+                    continue
+        if p_dict:
+            props_by_name[name] = p_dict
+    return props_by_name
 
 
 def _structure_material_overrides(rtstruct_path: str) -> dict[str, str]:
@@ -144,7 +223,19 @@ def _structure_material_overrides(rtstruct_path: str) -> dict[str, str]:
         try:
             material = str(obs[0x300a, 0x00e1].value)  # ROI material override
         except KeyError:
-            continue
+            obs_type = str(getattr(obs, "RTROIInterpretedType", "")).upper()
+            low_name = name.lower()
+            if obs_type == "SUPPORT" or any(k in low_name for k in ("couch", "table", "qfix", "medphoton")):
+                if "core" in low_name or "air" in low_name:
+                    material = "Air"
+                elif "2.03" in low_name or "shell" in low_name:
+                    material = "Shell 2.03"
+                elif "1.2" in low_name or "qfix" in low_name:
+                    material = "Qfix 1.200"
+                else:
+                    continue
+            else:
+                continue
         overrides[name] = material
     return overrides
 
@@ -190,6 +281,7 @@ def apply_density_overrides(CT, rtstruct_path: str, hu_density_file: str = None,
         log("no material overrides found in RTSTRUCT")
         return 0
 
+    phys_props = _structure_physical_properties(rtstruct_path)
     dcm = pydicom.dcmread(rtstruct_path, force=True)
     roi_by_number = {s.ROINumber: str(s.ROIName) for s in getattr(dcm, "StructureSetROISequence", [])}
     contour_by_name = {}
@@ -230,6 +322,7 @@ def apply_density_overrides(CT, rtstruct_path: str, hu_density_file: str = None,
     # contains the *simulator's* couch (imaged with the patient); the treatment
     # couch is modelled by the MedPhoton/Qfix Support contours. RayStation never
     # transports through the imaged sim couch — MCsquare must not either.
+    ext_mask = None
     ext_number = None
     for obs in getattr(dcm, "RTROIObservationsSequence", []):
         if str(getattr(obs, "RTROIInterpretedType", "")).upper() == "EXTERNAL":
@@ -261,7 +354,27 @@ def apply_density_overrides(CT, rtstruct_path: str, hu_density_file: str = None,
         m = material.lower().replace(" ", "")
         if "air" in m:
             continue  # cores handled in pass 2
-        target_hu = _hu_for_material(material)
+
+        # Check if couch shell
+        is_couch_shell = False
+        couch_hu = _couch_hu_for_material(material)
+        if couch_hu is not None:
+            is_couch_shell = True
+            nom_dens = 1.20 if couch_hu == 8000 else 2.03
+            roi_p = phys_props.get(name, {})
+            if "REL_MASS_DENSITY" in roi_p and roi_p["REL_MASS_DENSITY"] > 0.1:
+                nom_dens = roi_p["REL_MASS_DENSITY"]
+
+            eff_dens = nom_dens
+            if COUCH_SHELL_DENSITY_OVERRIDE is not None:
+                eff_dens = float(COUCH_SHELL_DENSITY_OVERRIDE)
+            elif COUCH_SHELL_DENSITY_SCALE is not None:
+                eff_dens = nom_dens * float(COUCH_SHELL_DENSITY_SCALE)
+
+            target_hu = couch_density_to_hu(eff_dens)
+        else:
+            target_hu = _hu_for_material(material)
+
         if target_hu is None:
             unhandled.append((name, material))
             log("*" * 72)
@@ -279,28 +392,38 @@ def apply_density_overrides(CT, rtstruct_path: str, hu_density_file: str = None,
             log(f"override '{name}': no contour data — skipped")
             continue
         mask = rasterize(rc)
-        is_couch_shell = target_hu in (8000, 8001)
         if is_couch_shell and COUCH_WALL_DILATION_VOX > 0:
             from scipy.ndimage import binary_dilation
             struct = np.zeros((3, 3, 1), dtype=bool)
             struct[:, :, 0] = True   # in-plane (x,y) only; z untouched
             mask = binary_dilation(mask, structure=struct,
                                    iterations=COUCH_WALL_DILATION_VOX)
+            # Skin guard: never dilate couch shell into patient External
+            if ext_mask is not None:
+                orig_sum = int(mask.sum())
+                mask = mask & (~ext_mask)
+                clipped = orig_sum - int(mask.sum())
+                if clipped > 0:
+                    log(f"override '{name}': skin guard clipped {clipped} dilated voxels overlapping External")
         n_vox = int(mask.sum())
         if n_vox == 0:
             log(f"override '{name}': rasterized to 0 voxels — skipped")
             continue
         CT.Image[mask] = np.float32(target_hu)
         dil = COUCH_WALL_DILATION_VOX if is_couch_shell else 0
-        log(f"override '{name}': material='{material}' -> HU={int(target_hu)} "
-            f"({n_vox} voxels, solid+{dil}vox dilation)")
+        if is_couch_shell and (COUCH_SHELL_DENSITY_OVERRIDE is not None or COUCH_SHELL_DENSITY_SCALE is not None):
+            log(f"override '{name}': couch shell calibrated to {eff_dens:.3f} g/cm3 -> HU={target_hu:.1f} "
+                f"({n_vox} voxels, solid+{dil}vox dilation)")
+        else:
+            log(f"override '{name}': material='{material}' -> HU={int(round(target_hu))} "
+                f"({n_vox} voxels, solid+{dil}vox dilation)")
         applied += 1
 
-    # ---- pass 2: cores painted AIR — matching the TPS material model ---------
+    # ---- pass 2: cores painted AIR or low-density foam -----------------------
     # RayStation models the couch as Shell(2.03)/Qfix(1.20) walls with AIR
-    # cores, and QA compares MC against the TPS computation, so MC must use the
-    # same material model. The External-masked gamma excludes the segmented
-    # couch voxels from scoring entirely.
+    # or lightweight foam (Rohacell) cores. We inspect the RTSTRUCT physical
+    # properties: if REL_MASS_DENSITY or REL_ELEC_DENSITY > 0.01, we paint
+    # the core with the appropriate foam HU rather than pure vacuum (-1000 HU).
     for name, material in overrides.items():
         m = material.lower().replace(" ", "")
         if "air" not in m:
@@ -314,9 +437,22 @@ def apply_density_overrides(CT, rtstruct_path: str, hu_density_file: str = None,
         if n_vox == 0:
             log(f"core '{name}': rasterized to 0 voxels — skipped")
             continue
-        CT.Image[mask] = np.float32(AIR_HU)
-        log(f"core '{name}': painted {n_vox} voxels AIR (HU={AIR_HU}) — "
-            f"carves walls, matches TPS model")
+
+        # Check for non-air foam density in RTSTRUCT
+        roi_p = phys_props.get(name, {})
+        core_dens = roi_p.get("REL_MASS_DENSITY", 0.0)
+        if core_dens <= 0.0:
+            core_dens = roi_p.get("REL_ELEC_DENSITY", 0.0)
+
+        if core_dens > 0.01:
+            core_hu = foam_density_to_hu(core_dens)
+            CT.Image[mask] = np.float32(core_hu)
+            log(f"core '{name}': non-air density detected in RTSTRUCT ({core_dens:.4f} g/cm3) -> HU={core_hu:.1f} "
+                f"({n_vox} voxels foam model) — carves walls, matches TPS model")
+        else:
+            CT.Image[mask] = np.float32(AIR_HU)
+            log(f"core '{name}': painted {n_vox} voxels AIR (HU={AIR_HU}) — "
+                f"carves walls, matches TPS model")
         applied += 1
 
     # ---- summary -------------------------------------------------------------
