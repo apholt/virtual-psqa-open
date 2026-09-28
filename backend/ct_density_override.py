@@ -61,7 +61,9 @@ Known unhandled as of 2026-07-16 (from audit_materials.py over the store):
 Overrides are matched by the structure's material name (0x300a,0x00e1), the same
 tag RayStation/SDC use.
 """
-from __future__ import annotations
+import os
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pydicom
@@ -137,28 +139,63 @@ except Exception:
     pass
 
 
-def couch_density_to_hu(density: float) -> float:
+def _load_scanner_densities(hu_density_file: Optional[str] = None) -> dict[int, float]:
+    """Parse reserved HU codes (8000, 8001) from HU_Density_Conversion.txt if available."""
+    densities = {8000: 1.20, 8001: 2.05}
+    candidates = []
+    if hu_density_file:
+        candidates.append(Path(hu_density_file))
+    candidates.extend([
+        Path("./MCsquare/Scanners/default/HU_Density_Conversion.txt"),
+        Path("../MCsquare/Scanners/default/HU_Density_Conversion.txt"),
+    ])
+    for cand in candidates:
+        if cand.is_file():
+            try:
+                with open(cand, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            try:
+                                hu_val = int(round(float(parts[0])))
+                                dens_val = float(parts[1])
+                                if hu_val in (8000, 8001):
+                                    densities[hu_val] = dens_val
+                            except (ValueError, TypeError):
+                                pass
+                break
+            except Exception:
+                pass
+    return densities
+
+
+def couch_density_to_hu(density: float, calib_8001: float = 2.05, calib_8000: float = 1.20) -> float:
     """
     Map a target physical density (g/cm3) for carbon fiber (CFRP) to the HU code
     that will yield that exact density in MCsquare while preserving material label 67 (CFRP).
 
     Based on Scanners/default/ calibrations:
-      HU 8000 -> 1.20 g/cm3, material 67 (CFRP)
-      HU 8001 -> 2.03 g/cm3, material 67 (CFRP)
+      HU 8000 -> calib_8000 (nominally 1.20 g/cm3), material 67 (CFRP)
+      HU 8001 -> calib_8001 (nominally 2.05 g/cm3), material 67 (CFRP)
       HU 8040 -> material 73 (Au) threshold
       HU 8500 -> 19.20 g/cm3
 
-    For densities in [1.20, 2.03]:
-      HU = 8000 + (density - 1.20) / (2.03 - 1.20) * (8001 - 8000)
-    For densities in [2.03, 3.37] (HU < 8040):
-      HU = 8001 + (density - 2.03) / (19.20 - 2.03) * (8500 - 8001)
+    For densities in [calib_8000, calib_8001]:
+      HU = 8000 + (density - calib_8000) / (calib_8001 - calib_8000) * (8001 - 8000)
+    For densities in [calib_8001, 3.37] (HU < 8040):
+      HU = 8001 + (density - calib_8001) / (19.20 - calib_8001) * (8500 - 8001)
     """
-    if density <= 1.20:
+    if density <= calib_8000:
         return 8000.0
-    elif density <= 2.03:
-        return 8000.0 + (density - 1.20) / (2.03 - 1.20) * (8001.0 - 8000.0)
+    elif density <= calib_8001:
+        if abs(calib_8001 - calib_8000) < 1e-4:
+            return 8001.0
+        return 8000.0 + (density - calib_8000) / (calib_8001 - calib_8000) * (8001.0 - 8000.0)
     else:
-        hu = 8001.0 + (density - 2.03) / (19.20 - 2.03) * (8500.0 - 8001.0)
+        hu = 8001.0 + (density - calib_8001) / (19.20 - calib_8001) * (8500.0 - 8001.0)
         return min(hu, 8039.0)
 
 
@@ -282,6 +319,10 @@ def apply_density_overrides(CT, rtstruct_path: str, hu_density_file: str = None,
         return 0
 
     phys_props = _structure_physical_properties(rtstruct_path)
+    scanner_densities = _load_scanner_densities(hu_density_file)
+    calib_8001 = scanner_densities.get(8001, 2.05)
+    calib_8000 = scanner_densities.get(8000, 1.20)
+
     dcm = pydicom.dcmread(rtstruct_path, force=True)
     roi_by_number = {s.ROINumber: str(s.ROIName) for s in getattr(dcm, "StructureSetROISequence", [])}
     contour_by_name = {}
@@ -360,7 +401,7 @@ def apply_density_overrides(CT, rtstruct_path: str, hu_density_file: str = None,
         couch_hu = _couch_hu_for_material(material)
         if couch_hu is not None:
             is_couch_shell = True
-            nom_dens = 1.20 if couch_hu == 8000 else 2.03
+            nom_dens = calib_8000 if couch_hu == 8000 else calib_8001
             roi_p = phys_props.get(name, {})
             if "REL_MASS_DENSITY" in roi_p and roi_p["REL_MASS_DENSITY"] > 0.1:
                 nom_dens = roi_p["REL_MASS_DENSITY"]
@@ -371,7 +412,7 @@ def apply_density_overrides(CT, rtstruct_path: str, hu_density_file: str = None,
             elif COUCH_SHELL_DENSITY_SCALE is not None:
                 eff_dens = nom_dens * float(COUCH_SHELL_DENSITY_SCALE)
 
-            target_hu = couch_density_to_hu(eff_dens)
+            target_hu = couch_density_to_hu(eff_dens, calib_8001=calib_8001, calib_8000=calib_8000)
         else:
             target_hu = _hu_for_material(material)
 

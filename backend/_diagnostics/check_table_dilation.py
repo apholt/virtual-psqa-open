@@ -489,6 +489,38 @@ def rasterize_roi(rc, grid_size, ipp, ps) -> np.ndarray:
     return mask
 
 
+def _load_scanner_densities(hu_file: Optional[Path] = None) -> dict[int, float]:
+    densities = {8000: 1.20, 8001: 2.05}
+    candidates = []
+    if hu_file:
+        candidates.append(Path(hu_file))
+    candidates.extend([
+        Path("./MCsquare/Scanners/default/HU_Density_Conversion.txt"),
+        Path("../MCsquare/Scanners/default/HU_Density_Conversion.txt"),
+        Path("../../MCsquare/Scanners/default/HU_Density_Conversion.txt"),
+    ])
+    for cand in candidates:
+        if cand.is_file():
+            try:
+                for line in cand.read_text().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        try:
+                            hu_val = int(round(float(parts[0])))
+                            d_val = float(parts[1])
+                            if hu_val in (8000, 8001):
+                                densities[hu_val] = d_val
+                        except (ValueError, TypeError):
+                            pass
+                break
+            except Exception:
+                pass
+    return densities
+
+
 def get_couch_contours(rtstruct_path: Path):
     dcm = pydicom.dcmread(str(rtstruct_path), force=True)
     names = {s.ROINumber: str(s.ROIName) for s in getattr(dcm, "StructureSetROISequence", [])}
@@ -524,6 +556,10 @@ def get_couch_contours(rtstruct_path: Path):
     cores = []
     external = None
 
+    scanner_dens = _load_scanner_densities()
+    default_medphoton = scanner_dens.get(8001, 2.05)
+    default_qfix = scanner_dens.get(8000, 1.20)
+
     for name, rc in contours.items():
         low = name.lower()
         mat = overrides.get(name, "").lower()
@@ -536,7 +572,7 @@ def get_couch_contours(rtstruct_path: Path):
                 core_dens = props.get("REL_ELEC_DENSITY", 0.0)
             cores.append((name, rc, core_dens))
         elif "shell" in low or "couch" in low or "table" in low or "qfix" in low or "2.03" in mat or "1.2" in mat:
-            density = 2.03 if ("2.03" in mat or "shell" in low) else 1.20
+            density = default_medphoton if ("2.03" in mat or "shell" in low or "medphoton" in low) else default_qfix
             if "REL_MASS_DENSITY" in props and props["REL_MASS_DENSITY"] > 0.1:
                 density = props["REL_MASS_DENSITY"]
             shells.append((name, rc, density))
