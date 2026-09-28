@@ -22,6 +22,7 @@ Virtual PSQA combines **FastAPI**, **React / Vite**, and **openMCsquare** to pro
 | 🐧 [**Linux Deployment & User Guide**](README_LINUX.md) | Full setup guide for Arch, Ubuntu/Debian, Fedora/RHEL, including CPU SIMD binary selection, systemd service, and `./run.sh` | Linux Workstations & Servers |
 | 🪟 [**Windows Deployment & User Guide**](README_WINDOWS.md) | Standalone portable launcher (`run.bat`), pre-bundled Windows Python runtime, and zero-dependency quick start | Windows 10 / 11 |
 | 📖 [**Physicist Clinical Manual**](MANUAL.md) | Comprehensive physicist reference for clinical metrics, gate thresholds, and log verification | Clinical Physicists |
+| 🎯 [**Beam Range & Couch Diagnostics**](DIAGNOSTICS.md) | Central-axis depth-dose verification, couch WET ray tracing, and sub-millimeter density calibration | Medical Physicists & Researchers |
 | 🚀 [**Standard Deployment Guide**](DEPLOYMENT.md) | Production server architecture, network configuration, and DICOM watch folders | Clinic IT & Administrators |
 
 ---
@@ -130,6 +131,22 @@ flowchart TD
         LogQA --> Interrupted["Interrupted Beam Detection & Re-upload"]
     end
 ```
+
+---
+
+## Beam Range Verification & Couch Calibration Diagnostics
+
+When proton beams traverse the treatment couch (posterior and posterior-oblique fields, gantry $120^\circ–240^\circ$), minor discrepancies in couch modeling or CT rasterization can lead to distal range shifts. Virtual PSQA includes a dedicated diagnostic suite in [`backend/_diagnostics/`](backend/_diagnostics/) to inspect depth-dose profiles, measure ray Water-Equivalent Thickness (WET), and determine continuous density calibrations:
+
+```bash
+# Evaluate couch WET, dilation, and calculate exact continuous density calibration:
+python backend/_diagnostics/check_table_dilation.py <plan_id>
+
+# High-precision central-axis depth-dose profile check (absolute Gy, distal 80%/50%/20% edges):
+python backend/_diagnostics/range_check_v2.py <plan_id>
+```
+
+For full documentation, ray-tracing mechanics, and the step-by-step clinical calibration workflow, see [**`DIAGNOSTICS.md`**](DIAGNOSTICS.md).
 
 ---
 

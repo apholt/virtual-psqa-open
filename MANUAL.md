@@ -547,6 +547,12 @@ only the dose source differs. Use this until the real binary is commissioned.
 - For `patient_ct` geometry: the patient CT series exported with the plan.
 - `MCSQUARE_GEOMETRY` set to match what your RTDose was computed on.
 
+**Couch Modeling & Range Diagnostics**
+
+Posterior and posterior-oblique fields ($120^\circ–240^\circ$) traverse the treatment couch top. Virtual PSQA automatically applies material overrides (`backend/ct_density_override.py`) to replicate the TPS couch geometry, supports continuous density calibration (`COUCH_SHELL_DENSITY_OVERRIDE`), and automatically models lightweight core foam from RTSTRUCT tags (`(3006, 00B0)`).
+
+To diagnose range shifts, evaluate couch WET, and determine exact continuous density values, use the diagnostic scripts in `backend/_diagnostics/`. See [**`DIAGNOSTICS.md`**](DIAGNOSTICS.md) for full clinical instructions.
+
 ---
 
 ## 12. Evidence layer 3 — Delivery log (RT Ion Record) reconstruction
@@ -837,6 +843,7 @@ Re-installing Python deps is only needed if `requirements.txt` changed:
 | Frontend not loading / blank page | Rebuild: `cd frontend && npm run build`. Server logs "Serving frontend from: …\frontend\dist"; if "dist not found", build it. |
 | MCsquare error / "exited with code N" | Error includes the last lines of MCsquare output. Common causes: wrong `MCSQUARE_HOME` (can't find `Materials\`), wrong BDL, geometry/RTDose mismatch, missing CT for `patient_ct`. Or set `SIMULATION_MODE=True` while fixing commissioning. |
 | Gamma looks wrong / fails | Almost always a geometry mismatch: `MCSQUARE_GEOMETRY` must match how the RTDose was computed (`patient_ct` vs `water`). |
+| Posterior beams fail gamma / show distal shift | Couch modeling discrepancy. Run `python backend/_diagnostics/check_table_dilation.py <plan_id>` to measure range shift and determine the calibrated continuous density. See [`DIAGNOSTICS.md`](DIAGNOSTICS.md). |
 | Every verdict is "measure" | Expected in bootstrap mode (until ≥ `ML_RETRAIN_MIN_CASES` outcomes recorded **and** you retrain). Correct, safe behaviour. |
 | PDF report returns HTML | WeasyPrint/GTK not installed — use browser Save as PDF. |
 | Database errors after update | Run `alembic upgrade head` from `backend\`. |
