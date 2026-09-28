@@ -143,8 +143,9 @@ def read_dose_volume(dose_path: Path):
         orig = data["origin"]
         spacing = (float(sp[2]), float(sp[1]), float(sp[0]))
         origin = (float(orig[2]), float(orig[1]), float(orig[0]))
-        return arr, origin, spacing
-    return read_mhd(dose_path)
+        return arr, origin, spacing, True
+    arr, origin, spacing = read_mhd(dose_path)
+    return arr, origin, spacing, False
 
 
 def scan_store_dicoms(store_path: str):
@@ -260,6 +261,9 @@ def load_rtplan_beams(
 
         plan_beams = {}
         treatment_beams = 0
+        treatment_ordinal = 0
+        plan_iso = None
+
         for b in seq:
             try:
                 bn = int(getattr(b, "BeamNumber", len(plan_beams) + 1))
@@ -280,6 +284,8 @@ def load_rtplan_beams(
                 if iso is None and hasattr(cp, "IsocenterPosition"):
                     try:
                         iso = [float(v) for v in cp.IsocenterPosition]
+                        if plan_iso is None:
+                            plan_iso = iso
                     except (TypeError, ValueError):
                         pass
                 if gantry is not None and iso is not None:
@@ -293,14 +299,38 @@ def load_rtplan_beams(
             if iso is None and hasattr(b, "IsocenterPosition"):
                 try:
                     iso = [float(v) for v in b.IsocenterPosition]
+                    if plan_iso is None:
+                        plan_iso = iso
                 except (TypeError, ValueError):
                     pass
 
             deliv_type = str(getattr(b, "TreatmentDeliveryType", "TREATMENT")).upper()
-            if deliv_type != "SETUP":
+            is_treatment = (deliv_type != "SETUP")
+            if is_treatment:
                 treatment_beams += 1
+                treatment_ordinal += 1
+                ord_val = treatment_ordinal
+            else:
+                ord_val = None
 
-            plan_beams[bn] = dict(name=name, gantry=gantry, iso=iso, dcm_beam=b)
+            plan_beams[bn] = dict(
+                name=name,
+                gantry=gantry,
+                iso=iso,
+                treatment=is_treatment,
+                ordinal=ord_val,
+                beam_number=bn,
+                dcm_beam=b,
+            )
+
+        # Fallbacks: propagate plan_iso to any beam missing isocenter
+        for b_dict in plan_beams.values():
+            if b_dict["iso"] is None and plan_iso is not None:
+                b_dict["iso"] = plan_iso
+            if b_dict["gantry"] is None:
+                mach = str(getattr(d, "TreatmentMachineName", "") or "").upper()
+                if "FB" in mach or "FIXED" in mach:
+                    b_dict["gantry"] = 0.0
 
         valid_plans.append({
             "file": f,
@@ -357,13 +387,13 @@ def load_rtplan_beams(
     return chosen["beams"], chosen["file"], chosen["dcm"]
 
 
-def load_tps_beams(categorized: dict, active_plan_uid: Optional[str] = None) -> List[dict]:
+def load_tps_beams(categorized: dict, active_plan_uid: Optional[str] = None) -> Tuple[List[dict], Optional[dict]]:
     out = []
+    plan_composite = None
     for f, _ in categorized["doses"]:
         try:
             full_d = pydicom.dcmread(str(f), force=True)
-            if str(getattr(full_d, "DoseSummationType", "")).upper() != "BEAM":
-                continue
+            summary_type = str(getattr(full_d, "DoseSummationType", "")).upper()
 
             # If active_plan_uid is specified, verify this dose belongs to the chosen RTPLAN
             if active_plan_uid:
@@ -375,27 +405,35 @@ def load_tps_beams(categorized: dict, active_plan_uid: Optional[str] = None) -> 
 
             beam_no = None
             try:
-                beam_no = int(
-                    full_d.ReferencedRTPlanSequence[0]
-                    .ReferencedFractionGroupSequence[0]
-                    .ReferencedBeamSequence[0]
-                    .ReferencedBeamNumber
-                )
+                rfp = full_d.ReferencedRTPlanSequence[0]
+                rfg = rfp.ReferencedFractionGroupSequence[0]
+                rfb = rfg.ReferencedBeamSequence[0]
+                beam_no = int(rfb.ReferencedBeamNumber)
             except Exception:
                 pass
+            if beam_no is None:
+                try:
+                    ref_beams = getattr(full_d, "ReferencedBeamSequence", None)
+                    if ref_beams and len(ref_beams) > 0:
+                        beam_no = int(ref_beams[0].ReferencedBeamNumber)
+                except Exception:
+                    pass
             if beam_no is None and hasattr(full_d, "ReferencedBeamNumber"):
                 try:
                     beam_no = int(full_d.ReferencedBeamNumber)
                 except Exception:
                     pass
             if beam_no is None:
-                match = re.search(r'beam[_\s\-]*(\d+)', f.name, re.IGNORECASE) or re.search(
-                    r'beam[_\s\-]*(\d+)', getattr(full_d, "SeriesDescription", ""), re.IGNORECASE
-                )
-                if match:
-                    beam_no = int(match.group(1))
+                series_desc = str(getattr(full_d, "SeriesDescription", "") or "")
+                beam_name = str(getattr(full_d, "BeamName", "") or "")
+                m = re.search(r'beam[_\s\-]*(\d+)', f.name, re.IGNORECASE) or \
+                    re.search(r'beam[_\s\-]*(\d+)', series_desc, re.IGNORECASE) or \
+                    re.search(r'beam[_\s\-]*(\d+)', beam_name, re.IGNORECASE) or \
+                    re.search(r'[_\-\s]b(\d+)[_\-\s\.]', f.name, re.IGNORECASE)
+                if m:
+                    beam_no = int(m.group(1))
 
-            scaling = float(getattr(full_d, "DoseGridScaling", 1.0))
+            scaling = float(getattr(full_d, "DoseGridScaling", 1.0) or 1.0)
             arr = full_d.pixel_array.astype(np.float32) * scaling
             ipp = [float(v) for v in full_d.ImagePositionPatient]
             prow = float(full_d.PixelSpacing[0])
@@ -403,19 +441,26 @@ def load_tps_beams(categorized: dict, active_plan_uid: Optional[str] = None) -> 
             if hasattr(full_d, "GridFrameOffsetVector"):
                 gfov = np.array([float(v) for v in full_d.GridFrameOffsetVector])
             else:
-                gfov = np.arange(arr.shape[0]) * float(getattr(full_d, "SliceThickness", 2.0))
+                gfov = np.arange(arr.shape[0]) * float(getattr(full_d, "SliceThickness", 2.0) or 2.0)
 
-            out.append(dict(
+            dose_info = dict(
                 beam=beam_no,
                 file=f.name,
                 array=arr,
                 xs=ipp[0] + np.arange(arr.shape[2]) * pcol,
                 ys=ipp[1] + np.arange(arr.shape[1]) * prow,
                 zs=ipp[2] + gfov,
-            ))
+                summary_type=summary_type,
+            )
+
+            if summary_type in ("BEAM", "BEAM_SESSION", "FRACTION") or beam_no is not None:
+                out.append(dose_info)
+            elif summary_type == "PLAN" or summary_type == "":
+                if plan_composite is None:
+                    plan_composite = dose_info
         except Exception:
             continue
-    return out
+    return out, plan_composite
 
 
 def beam_dir(gantry_deg: float) -> np.ndarray:
@@ -603,8 +648,16 @@ def measure_dose_range_shift(mcf: Path, tps: dict, pb: dict) -> Optional[float]:
     try:
         iso = np.array(pb["iso"])
         d = beam_dir(pb["gantry"])
-        mc_raw, mc_o, mc_sp = read_dose_volume(mcf)
-        mc = np.ascontiguousarray(np.flip(np.flip(mc_raw, 2), 1))
+        mc_raw, mc_o, mc_sp, from_npz = read_dose_volume(mcf)
+        if from_npz:
+            mc = np.ascontiguousarray(mc_raw)
+        else:
+            mc = np.ascontiguousarray(np.flip(np.flip(mc_raw, 2), 1))
+
+        if float(mc.max()) > 500.0:
+            t_max_ref = float(tps["array"].max())
+            if mc.max() > 0 and t_max_ref > 0:
+                mc = mc * (t_max_ref / float(mc.max()))
 
         ox, oy, oz = mc_o
         sx, sy, sz = mc_sp
@@ -761,17 +814,24 @@ def main():
         couch_z_mid_mm = None
 
     active_uid = str(getattr(plan_dcm, "SOPInstanceUID", "")) if plan_dcm else None
-    tps_beams = load_tps_beams(categorized, active_plan_uid=active_uid) if plan_dir else []
-    mc_files = sorted(plan_dir.rglob("Dose_Beam*.mhd")) if plan_dir else []
+    tps_beams, plan_composite = load_tps_beams(categorized, active_plan_uid=active_uid) if plan_dir else ([], None)
+    mc_files = sorted(plan_dir.rglob("mc_dose_beam*.npz")) if plan_dir else []
     if not mc_files and plan_dir:
-        mc_files = sorted(plan_dir.rglob("mc_dose_beam*.npz"))
+        mc_files = sorted(plan_dir.rglob("Dose_Beam*.mhd"))
+
+    mc_by_num: Dict[int, Path] = {}
+    for mcf in mc_files:
+        digits = "".join(ch for ch in mcf.stem if ch.isdigit())
+        if digits:
+            mc_by_num[int(digits)] = mcf
 
     candidate_dilations = [0, 1, 2, 3, 4]
     struct_2d = np.zeros((3, 3, 1), dtype=bool)
     struct_2d[:, :, 0] = True  # in-plane only
 
     for bn, pb in plan_beams.items():
-        if args.beam is not None and bn != args.beam:
+        ord_idx = pb.get("ordinal", bn)
+        if args.beam is not None and bn != args.beam and ord_idx != args.beam:
             continue
         gantry = pb["gantry"]
         iso = pb["iso"]
@@ -792,9 +852,19 @@ def main():
             eval_z = couch_z_mid_mm
 
         range_error_mm = None
-        if tps_beams and mc_files:
-            mcf = next((m for m in mc_files if str(bn) in m.stem), None)
-            tps = next((t for t in tps_beams if t["beam"] == bn), None)
+        if (tps_beams or plan_composite) and mc_files:
+            mcf = mc_by_num.get(bn) or mc_by_num.get(ord_idx)
+            if mcf is None and len(mc_files) == 1:
+                mcf = mc_files[0]
+
+            tps = next((t for t in tps_beams if t.get("beam") == bn), None)
+            if tps is None:
+                tps = next((t for t in tps_beams if t.get("beam") == ord_idx), None)
+            if tps is None and len(tps_beams) == 1:
+                tps = tps_beams[0]
+            if tps is None and plan_composite is not None:
+                tps = plan_composite
+
             if mcf and tps:
                 range_error_mm = measure_dose_range_shift(mcf, tps, pb)
                 if range_error_mm is not None:

@@ -26,6 +26,7 @@
 import argparse
 import math
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -84,8 +85,9 @@ def read_dose_volume(dose_path):
         orig = data["origin"]
         spacing = (float(sp[2]), float(sp[1]), float(sp[0]))
         origin = (float(orig[2]), float(orig[1]), float(orig[0]))
-        return arr, origin, spacing
-    return read_mhd(dose_path)
+        return arr, origin, spacing, True
+    arr, origin, spacing = read_mhd(dose_path)
+    return arr, origin, spacing, False
 
 
 def find_plan_info(plan_id: int) -> dict:
@@ -252,6 +254,9 @@ def load_rtplan_beams(
 
         plan_beams = {}
         treatment_beams = 0
+        treatment_ordinal = 0
+        plan_iso = None
+
         for b in seq:
             try:
                 bn = int(getattr(b, "BeamNumber", len(plan_beams) + 1))
@@ -272,6 +277,8 @@ def load_rtplan_beams(
                 if iso is None and hasattr(cp, "IsocenterPosition"):
                     try:
                         iso = [float(v) for v in cp.IsocenterPosition]
+                        if plan_iso is None:
+                            plan_iso = iso
                     except (TypeError, ValueError):
                         pass
                 if gantry is not None and iso is not None:
@@ -285,14 +292,37 @@ def load_rtplan_beams(
             if iso is None and hasattr(b, "IsocenterPosition"):
                 try:
                     iso = [float(v) for v in b.IsocenterPosition]
+                    if plan_iso is None:
+                        plan_iso = iso
                 except (TypeError, ValueError):
                     pass
 
             deliv_type = str(getattr(b, "TreatmentDeliveryType", "TREATMENT")).upper()
-            if deliv_type != "SETUP":
+            is_treatment = (deliv_type != "SETUP")
+            if is_treatment:
                 treatment_beams += 1
+                treatment_ordinal += 1
+                ord_val = treatment_ordinal
+            else:
+                ord_val = None
 
-            plan_beams[bn] = dict(name=name, gantry=gantry, iso=iso)
+            plan_beams[bn] = dict(
+                name=name,
+                gantry=gantry,
+                iso=iso,
+                treatment=is_treatment,
+                ordinal=ord_val,
+                beam_number=bn,
+            )
+
+        # Fallbacks: propagate plan_iso to any beam missing isocenter
+        for b_dict in plan_beams.values():
+            if b_dict["iso"] is None and plan_iso is not None:
+                b_dict["iso"] = plan_iso
+            if b_dict["gantry"] is None:
+                mach = str(getattr(d, "TreatmentMachineName", "") or "").upper()
+                if "FB" in mach or "FIXED" in mach:
+                    b_dict["gantry"] = 0.0
 
         valid_plans.append({
             "file": f,
@@ -345,13 +375,13 @@ def load_rtplan_beams(
     return chosen["beams"], chosen["file"], chosen["dcm"]
 
 
-def load_tps_beams(categorized: dict, active_plan_uid: Optional[str] = None) -> List[dict]:
+def load_tps_beams(categorized: dict, active_plan_uid: Optional[str] = None) -> Tuple[List[dict], Optional[dict]]:
     out = []
+    plan_composite = None
     for f, _ in categorized["doses"]:
         try:
             full_d = pydicom.dcmread(str(f), force=True)
-            if str(getattr(full_d, "DoseSummationType", "")).upper() != "BEAM":
-                continue
+            summary_type = str(getattr(full_d, "DoseSummationType", "")).upper()
 
             if active_plan_uid:
                 ref_seq = getattr(full_d, "ReferencedRTPlanSequence", None)
@@ -359,29 +389,38 @@ def load_tps_beams(categorized: dict, active_plan_uid: Optional[str] = None) -> 
                     dose_plan_uid = str(ref_seq[0].ReferencedSOPInstanceUID)
                     if dose_plan_uid != active_plan_uid:
                         continue
+
             beam_no = None
             try:
-                beam_no = int(
-                    full_d.ReferencedRTPlanSequence[0]
-                    .ReferencedFractionGroupSequence[0]
-                    .ReferencedBeamSequence[0]
-                    .ReferencedBeamNumber
-                )
+                rfp = full_d.ReferencedRTPlanSequence[0]
+                rfg = rfp.ReferencedFractionGroupSequence[0]
+                rfb = rfg.ReferencedBeamSequence[0]
+                beam_no = int(rfb.ReferencedBeamNumber)
             except Exception:
                 pass
+            if beam_no is None:
+                try:
+                    ref_beams = getattr(full_d, "ReferencedBeamSequence", None)
+                    if ref_beams and len(ref_beams) > 0:
+                        beam_no = int(ref_beams[0].ReferencedBeamNumber)
+                except Exception:
+                    pass
             if beam_no is None and hasattr(full_d, "ReferencedBeamNumber"):
                 try:
                     beam_no = int(full_d.ReferencedBeamNumber)
                 except Exception:
                     pass
             if beam_no is None:
-                match = re.search(r'beam[_\s\-]*(\d+)', f.name, re.IGNORECASE) or re.search(
-                    r'beam[_\s\-]*(\d+)', getattr(full_d, "SeriesDescription", ""), re.IGNORECASE
-                )
-                if match:
-                    beam_no = int(match.group(1))
+                series_desc = str(getattr(full_d, "SeriesDescription", "") or "")
+                beam_name = str(getattr(full_d, "BeamName", "") or "")
+                m = re.search(r'beam[_\s\-]*(\d+)', f.name, re.IGNORECASE) or \
+                    re.search(r'beam[_\s\-]*(\d+)', series_desc, re.IGNORECASE) or \
+                    re.search(r'beam[_\s\-]*(\d+)', beam_name, re.IGNORECASE) or \
+                    re.search(r'[_\-\s]b(\d+)[_\-\s\.]', f.name, re.IGNORECASE)
+                if m:
+                    beam_no = int(m.group(1))
 
-            scaling = float(getattr(full_d, "DoseGridScaling", 1.0))
+            scaling = float(getattr(full_d, "DoseGridScaling", 1.0) or 1.0)
             arr = full_d.pixel_array.astype(np.float32) * scaling
             ipp = [float(v) for v in full_d.ImagePositionPatient]
             prow = float(full_d.PixelSpacing[0])
@@ -389,19 +428,26 @@ def load_tps_beams(categorized: dict, active_plan_uid: Optional[str] = None) -> 
             if hasattr(full_d, "GridFrameOffsetVector"):
                 gfov = np.array([float(v) for v in full_d.GridFrameOffsetVector])
             else:
-                gfov = np.arange(arr.shape[0]) * float(getattr(full_d, "SliceThickness", 2.0))
+                gfov = np.arange(arr.shape[0]) * float(getattr(full_d, "SliceThickness", 2.0) or 2.0)
 
-            out.append(dict(
+            dose_info = dict(
                 beam=beam_no,
                 file=f.name,
                 array=arr,
                 xs=ipp[0] + np.arange(arr.shape[2]) * pcol,
                 ys=ipp[1] + np.arange(arr.shape[1]) * prow,
                 zs=ipp[2] + gfov,
-            ))
+                summary_type=summary_type,
+            )
+
+            if summary_type in ("BEAM", "BEAM_SESSION", "FRACTION") or beam_no is not None:
+                out.append(dose_info)
+            elif summary_type == "PLAN" or summary_type == "":
+                if plan_composite is None:
+                    plan_composite = dose_info
         except Exception:
             continue
-    return out
+    return out, plan_composite
 
 
 def sample_on_tps(mc_arr, mc_origin, mc_spacing, tps):
@@ -564,42 +610,105 @@ def main():
 
     print(f"Active RTPLAN: {plan_file.name} (Fields: {len(plan_beams)})")
 
-    mc_files = sorted(plan_dir.rglob("Dose_Beam*.mhd"))
+    # Prioritize calibrated Gy-scaled DoseGrid (.npz) files in mcSquare_output
+    mc_files = sorted(plan_dir.rglob("mc_dose_beam*.npz"))
+    is_npz = bool(mc_files)
     if not mc_files:
-        mc_files = sorted(plan_dir.rglob("mc_dose_beam*.npz"))
+        mc_files = sorted(plan_dir.rglob("Dose_Beam*.mhd"))
+        if not mc_files:
+            mc_files = sorted(plan_dir.rglob("Dose*.mhd"))
+        is_npz = False
+
     if not mc_files:
-        fail(f"No Dose_Beam*.mhd or mc_dose_beam*.npz found under {plan_dir}")
+        fail(f"No mc_dose_beam*.npz or Dose_Beam*.mhd found under {plan_dir}")
 
     active_uid = str(getattr(plan_dcm, "SOPInstanceUID", "")) if plan_dcm else None
-    tps_beams = load_tps_beams(categorized, active_plan_uid=active_uid)
-    if not tps_beams:
-        fail(f"No BEAM RTDose found in {store}")
+    tps_beams, plan_composite = load_tps_beams(categorized, active_plan_uid=active_uid)
+    if not tps_beams and not plan_composite:
+        fail(f"No RTDose files found in {store}")
+
+    # Build lookup for MC files by beam number and ordinal
+    mc_by_num: dict[int, Path] = {}
+    for mcf in mc_files:
+        digits = "".join(ch for ch in mcf.stem if ch.isdigit())
+        if digits:
+            mc_by_num[int(digits)] = mcf
 
     ts = np.arange(T_MIN, T_MAX + T_STEP, T_STEP)
 
-    for mcf in mc_files:
-        bn = int("".join(ch for ch in mcf.stem if ch.isdigit()))
-        if args.beam is not None and bn != args.beam:
+    treatment_pbs = [pb for pb in plan_beams.values() if pb.get("treatment", True)]
+    treatment_pbs.sort(key=lambda x: (x.get("ordinal") or 999, x.get("beam_number") or 999))
+    if not treatment_pbs:
+        treatment_pbs = list(plan_beams.values())
+
+    evaluated_count = 0
+
+    for pb in treatment_pbs:
+        bn = pb["beam_number"]
+        ord_idx = pb.get("ordinal", bn)
+
+        if args.beam is not None and bn != args.beam and ord_idx != args.beam:
             continue
-        tps = next((t for t in tps_beams if t["beam"] == bn), None)
-        pb = plan_beams.get(bn)
-        if tps is None or pb is None or pb["gantry"] is None:
-            print("beam %d: missing TPS dose or geometry - skipped" % bn)
+
+        # Match MC dose file
+        mcf = mc_by_num.get(bn) or mc_by_num.get(ord_idx)
+        if mcf is None and len(mc_files) == 1 and len(treatment_pbs) == 1:
+            mcf = mc_files[0]
+
+        if mcf is None:
+            print(f"beam {bn} ({pb['name']}): no matching MC dose file found in {plan_dir} - skipped")
+            continue
+
+        # Match TPS dose
+        tps = next((t for t in tps_beams if t.get("beam") == bn), None)
+        if tps is None:
+            tps = next((t for t in tps_beams if t.get("beam") == ord_idx), None)
+        if tps is None and len(tps_beams) == 1 and len(treatment_pbs) == 1:
+            tps = tps_beams[0]
+        used_composite = False
+        if tps is None and plan_composite is not None:
+            tps = plan_composite
+            used_composite = True
+
+        if tps is None:
+            print(f"beam {bn} ({pb['name']}): missing TPS dose - skipped")
+            continue
+
+        if pb.get("gantry") is None:
+            print(f"beam {bn} ({pb['name']}): missing gantry angle in plan geometry - skipped")
+            continue
+
+        if pb.get("iso") is None:
+            print(f"beam {bn} ({pb['name']}): missing isocenter position in plan geometry - skipped")
             continue
 
         iso = np.array(pb["iso"])
         d = beam_dir(pb["gantry"])
-        mc_raw, mc_o, mc_sp = read_dose_volume(mcf)
-        mc = np.ascontiguousarray(np.flip(np.flip(mc_raw, 2), 1))
+
+        mc_raw, mc_o, mc_sp, from_npz = read_dose_volume(mcf)
+        if from_npz:
+            mc = np.ascontiguousarray(mc_raw)
+        else:
+            mc = np.ascontiguousarray(np.flip(np.flip(mc_raw, 2), 1))
+
+        # Handle raw uncalibrated MC simulation units (~1e5)
+        raw_scale_factor = 1.0
+        if float(mc.max()) > 500.0:
+            t_max_ref = float(tps["array"].max())
+            if mc.max() > 0 and t_max_ref > 0:
+                raw_scale_factor = t_max_ref / float(mc.max())
+                mc = mc * raw_scale_factor
+
         mc_s = sample_on_tps(mc, mc_o, mc_sp, tps)
         tarr = tps["array"]
 
         pts = iso[None, :] + ts[:, None] * d[None, :]
         tp = sample_ray(tarr, tps, pts)     # absolute Gy
-        mp = sample_ray(mc_s, tps, pts)     # MC raw*flip (unscaled)
+        mp = sample_ray(mc_s, tps, pts)     # absolute Gy
 
         tps_max = float(tarr.max())
         mc_max = float(mc_s.max())
+
         # robust high-dose level along THIS ray (99th pct of the >20%-of-peak
         # samples), used only to define the distal falloff fraction
         def hi_level(p):
@@ -611,14 +720,26 @@ def main():
         tp_hi = hi_level(tp)
         mp_hi = hi_level(mp)
 
+        evaluated_count += 1
+
         print("\n================ BEAM %d (%s) ================"
               % (bn, pb["name"] or "?"))
-        print("gantry %.1f  iso (%.1f, %.1f, %.1f)  dir (%.3f, %.3f, %.3f)"
+        if used_composite:
+            print("[NOTE: No per-beam TPS RTDose in store; sampled against composite PLAN RTDose]")
+        if raw_scale_factor != 1.0:
+            print("[NOTE: MC file '%s' was in raw simulation units (max=%.2e); auto-scaled to match TPS max %.2f Gy]"
+                  % (mcf.name, float(mc_raw.max()), tps_max))
+        print("gantry %.1f°  iso (%.1f, %.1f, %.1f) mm  dir (%.3f, %.3f, %.3f)"
               % (pb["gantry"], iso[0], iso[1], iso[2], d[0], d[1], d[2]))
-        print("TPS beam max %.4f Gy   MC beam max (raw*flip) %.4g" %
+        print("TPS beam max %.4f Gy   MC beam max %.4f Gy" %
               (tps_max, mc_max))
-        print("ray high-dose level:  TPS %.4f Gy   MC %.4g (raw)"
+        print("ray high-dose level:  TPS %.4f Gy   MC %.4f Gy"
               % (tp_hi, mp_hi))
+
+        if tp_hi <= 0 or mp_hi <= 0:
+            print("  [NOTE: Central ray does not intersect high-dose target around isocenter. Ray peak: TPS=%.2f Gy, MC=%.2f Gy]"
+                  % (tp.max(), mp.max()))
+            continue
 
         print("\n-- DISTAL falloff (walked outward from each curve's own "
               "peak; entrance tail cannot affect this) --")
@@ -637,7 +758,7 @@ def main():
         mc_floor = args.floor_frac * mc_max
         ts0, ts1 = dose_span(ts, tp, tp_floor)
         ms0, ms1 = dose_span(ts, mp, mc_floor)
-        print("  floor: TPS %.4f Gy (%.0f%% of max) | MC %.4g raw"
+        print("  floor: TPS %.4f Gy (%.0f%% of max) | MC %.4f Gy"
               % (tp_floor, args.floor_frac * 100, mc_floor))
         if ts0 is not None:
             print("  TPS dose from t=%+.1f to t=%+.1f mm  (span %.1f mm)"
@@ -662,6 +783,9 @@ def main():
         print("  (large MC%% with near-zero TPS%% here = MC entrance-channel "
               "dose the TPS clips at External -- expected, and this is what "
               "distorted v1's normalization)")
+
+    if evaluated_count == 0:
+        print("\nNo treatment beams could be evaluated. Please check --beam or inspect plan geometry.")
 
 
 if __name__ == "__main__":
