@@ -429,16 +429,15 @@ export function RobustnessDVHCard({
         {/* Legend Indicator */}
         <div className="flex items-center gap-4 text-[11px] text-clinical-muted">
           <div className="flex items-center gap-1.5">
-            <span className="inline-block w-4 h-0.5 bg-clinical-text" />
+            <svg width="18" height="6" className="shrink-0">
+              <line x1="0" y1="3" x2="18" y2="3" stroke="currentColor" strokeWidth="2" strokeDasharray="3 3" />
+            </svg>
             <span>MC Nominal</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span
-              className="inline-block w-4 h-0.5"
-              style={{
-                borderBottom: "1.5px dashed var(--color-clinical-text, #888)",
-              }}
-            />
+            <svg width="18" height="6" className="shrink-0">
+              <line x1="0" y1="3" x2="18" y2="3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
             <span>TPS Plan</span>
           </div>
           <div className="flex items-center gap-1.5">
@@ -658,25 +657,25 @@ export function RobustnessDVHCard({
                       stroke="none"
                     />
 
-                    {/* TPS Planned Reference Curve (Dashed) */}
+                    {/* TPS Planned Reference Curve (Solid - matches RayStation) */}
                     {tpsPath && (
                       <path
                         d={tpsPath}
                         fill="none"
                         stroke={roi.color}
-                        strokeWidth={1.5}
-                        strokeDasharray="4 3"
-                        strokeOpacity={0.65}
+                        strokeWidth={2.0}
+                        strokeLinecap="round"
+                        strokeOpacity={0.9}
                       />
                     )}
 
-                    {/* MCsquare Nominal Curve (Solid) */}
+                    {/* MCsquare Nominal Curve (Dotted - matches RayStation) */}
                     <path
                       d={nomPath}
                       fill="none"
                       stroke={roi.color}
-                      strokeWidth={2.2}
-                      strokeLinecap="round"
+                      strokeWidth={2.0}
+                      strokeDasharray="3 3"
                     />
                   </g>
                 );

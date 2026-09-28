@@ -398,21 +398,22 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
 
               return (
                 <g key={roi.roi_number}>
-                  {/* Reference Planned / Baseline (Dashed) */}
+                  {/* Reference Planned / Baseline (Solid - matches RayStation) */}
                   <path
                     d={`M ${refPoints}`}
                     fill="none"
                     stroke={color}
-                    strokeWidth={1.75}
-                    strokeDasharray="4 3"
-                    strokeOpacity={0.65}
+                    strokeWidth={2.0}
+                    strokeLinecap="round"
+                    strokeOpacity={0.9}
                   />
-                  {/* Daily sCT Deformed (Solid) */}
+                  {/* Daily sCT Deformed (Dotted - matches RayStation) */}
                   <path
                     d={`M ${sctPoints}`}
                     fill="none"
                     stroke={color}
-                    strokeWidth={2.4}
+                    strokeWidth={2.0}
+                    strokeDasharray="3 3"
                     strokeOpacity={1.0}
                   />
                 </g>
@@ -715,12 +716,16 @@ export const DeformedDVHCard: React.FC<DeformedDVHCardProps> = ({
         {/* Legend Indicator */}
         <div className="flex items-center gap-4 text-xs text-clinical-muted">
           <div className="flex items-center gap-1.5">
-            <span className="w-4 h-0.5 border-t-2 border-dashed border-clinical-muted/70" />
-            <span className="text-[11px]">{refLabel} (Dashed)</span>
+            <svg width="18" height="6" className="shrink-0">
+              <line x1="0" y1="3" x2="18" y2="3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+            <span className="text-[11px]">{refLabel} (Solid)</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-4 h-0.5 bg-clinical-text rounded" />
-            <span className="text-[11px] font-semibold text-clinical-text">Daily sCT MC (Solid)</span>
+            <svg width="18" height="6" className="shrink-0">
+              <line x1="0" y1="3" x2="18" y2="3" stroke="currentColor" strokeWidth="2" strokeDasharray="3 3" />
+            </svg>
+            <span className="text-[11px] font-semibold text-clinical-text">Daily sCT MC (Dotted)</span>
           </div>
         </div>
 

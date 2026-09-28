@@ -405,15 +405,15 @@ def _render_dvh_chart_svg(
                 band_d = f"M {min_pts[0]} " + " ".join(f"L {pt}" for pt in min_pts[1:]) + " " + " ".join(f"L {pt}" for pt in max_pts) + " Z"
                 paths.append(f'<path d="{band_d}" fill="{color}" fill-opacity="0.22" stroke="none"/>')
 
-        # 2. TPS curve (dashed)
+        # 2. TPS curve (solid - matches RayStation)
         if getattr(dvh, "tps_volume_pct", None):
             tps_pts = " ".join(f"{px(b):.1f},{py(v):.1f}" for b, v in zip(bins, dvh.tps_volume_pct))
-            paths.append(f'<polyline points="{tps_pts}" fill="none" stroke="{color}" stroke-width="1.5" stroke-dasharray="4 3" stroke-opacity="0.75"/>')
+            paths.append(f'<polyline points="{tps_pts}" fill="none" stroke="{color}" stroke-width="2.0" stroke-linecap="round" stroke-opacity="0.9"/>')
 
-        # 3. MC Nominal curve (solid)
+        # 3. MC Nominal curve (dotted - matches RayStation)
         if getattr(dvh, "mc_nominal_volume_pct", None):
             nom_pts = " ".join(f"{px(b):.1f},{py(v):.1f}" for b, v in zip(bins, dvh.mc_nominal_volume_pct))
-            paths.append(f'<polyline points="{nom_pts}" fill="none" stroke="{color}" stroke-width="2.2" stroke-linecap="round"/>')
+            paths.append(f'<polyline points="{nom_pts}" fill="none" stroke="{color}" stroke-width="2.0" stroke-dasharray="3 3"/>')
 
     return (
         f'<svg class="dvh-chart" width="{w}" height="{h}" viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">\n'
@@ -575,11 +575,11 @@ def _dvh_svg(
     <div class="dvh-styles-legend">
       <span style="font-weight:600;color:#c9d1d9;margin-right:2px;">Legend:</span>
       <span style="display:inline-flex;align-items:center;gap:4px;">
-        <span style="display:inline-block;width:18px;height:2.2px;background:#58a6ff;border-radius:1px;"></span>
+        <span style="display:inline-block;width:18px;border-bottom:2px dotted #58a6ff;"></span>
         <span>openMCsquare Nominal</span>
       </span>
       <span style="display:inline-flex;align-items:center;gap:4px;">
-        <span style="display:inline-block;width:18px;border-bottom:2px dashed #8b949e;"></span>
+        <span style="display:inline-block;width:18px;height:2px;background:#8b949e;border-radius:1px;"></span>
         <span>TPS Reference</span>
       </span>
       <span style="display:inline-flex;align-items:center;gap:4px;">
@@ -1693,7 +1693,7 @@ def build_synthetic_ct_report_html(
                 parts.extend(plots_html)
                 parts.append('</div>')
                 parts.append('<div class="muted" style="text-align:center;margin-top:8px;font-size:11px;">'
-                             'Solid Line: Daily SyntheticQACT Monte Carlo Dose &middot; Dashed Line: Planned TPS Reference Dose'
+                             'Solid Line: Planned TPS Reference Dose &middot; Dotted Line: Daily SyntheticQACT Monte Carlo Dose'
                              '</div>')
                 parts.append('</div>')
 
