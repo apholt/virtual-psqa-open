@@ -127,6 +127,7 @@ class Settings(BaseSettings):
 
     # Log reconstruction
     LOG_RECON_SPOT_SIGMA_MM: float = 5.0
+    LOG_RECON_USE_NOMINAL_SPOT_SIZE: bool = True
 
     # Gamma thresholds
     GAMMA_MCSQUARE_VS_TPS_DD: float = 3.0

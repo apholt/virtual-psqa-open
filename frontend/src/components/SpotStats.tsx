@@ -42,6 +42,7 @@ interface FractionStats {
   fraction: number;
   treatment_date: string;
   machine: string;
+  use_nominal_spot_size?: boolean;
   beams: BeamStats[];
 }
 
@@ -162,6 +163,11 @@ export function SpotStats({ planId }: { planId: number }) {
           </div>
         </div>
       ))}
+      {fractions.some((f) => f.use_nominal_spot_size) && (
+        <p style={{ fontSize: 10, color: "#8a8578", marginTop: 4 }}>
+          Reconstruction mode: nominal plan spot size (isolates trajectory and meterset delivery; machine-reported spot sizes tracked above in ΔSize max).
+        </p>
+      )}
       {anyEcho && (
         <p style={{ fontSize: 10, color: "#a8a496", marginTop: 2 }}>
           Spot sizes in the record match plan-nominal values exactly (echo) {"\u2014"}

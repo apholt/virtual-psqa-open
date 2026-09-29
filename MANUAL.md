@@ -353,7 +353,8 @@ is invalid.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `LOG_RECON_SPOT_SIGMA_MM` | `5.0` | Lateral Gaussian sigma (mm) used to paint each delivered spot. |
+| `LOG_RECON_USE_NOMINAL_SPOT_SIZE` | `True` | When `True`, delivered dose reconstruction uses nominal plan spot sizes ($\sigma_{\text{rx}}$), isolating spot positioning ($x, y$) and meterset ($MU$) delivery from machine nozzle spot size drift. Machine-measured spot sizes are still tracked and displayed in `ΔSize max`. When `False`, delivered dose convolves with machine-reported spot sizes. |
+| `LOG_RECON_SPOT_SIGMA_MM` | `5.0` | Fallback lateral Gaussian sigma (mm) if spot size is absent from DICOM. |
 
 ### Gamma criteria (see [§14](#14-gamma-analysis-how-doses-are-compared))
 

@@ -16,6 +16,8 @@ from typing import Optional
 import numpy as np
 import pydicom
 
+from config import settings
+
 logger = logging.getLogger(__name__)
 
 # Reconstruction grid (mm). 150 x 150 grid at 1 mm resolution spanning -150 to +149.5 mm
@@ -109,7 +111,7 @@ def _extract_prescribed_spots(plan_ds: pydicom.Dataset, beam_index: int) -> np.n
         px = pmap[::2]
         py = pmap[1::2]
         energy = float(cp.NominalBeamEnergy)
-        size = cp.ScanningSpotSize
+        size = getattr(cp, "ScanningSpotSize", [8.0, 8.0])
         sx, sy = float(size[0]), float(size[1])
         for j in range(n):
             out[s, 0] = energy
@@ -174,7 +176,7 @@ def _extract_delivered_spots(record_ds: pydicom.Dataset, beam_index: int) -> np.
         px = pmap[::2]
         py = pmap[1::2]
         indices = cp.ScanSpotPrescribedIndices
-        size = cp.ScanningSpotSize
+        size = getattr(cp, "ScanningSpotSize", [8.0, 8.0])
         sx, sy = float(size[0]), float(size[1])
         for j in range(n):
             out[s, 0] = indices[j] if hasattr(indices, "__len__") else indices
@@ -261,11 +263,23 @@ def _spot_metrics(prescribed: np.ndarray, delivered: np.ndarray) -> tuple:
 # Top-level entry point
 # --------------------------------------------------------------------------
 
-def reconstruct_from_record(plan_path: str, record_path: str) -> LogReconstructionResult:
+def reconstruct_from_record(
+    plan_path: str,
+    record_path: str,
+    use_nominal_spot_size: Optional[bool] = None,
+) -> LogReconstructionResult:
     """Reconstruct delivered vs prescribed dose for every matched beam.
 
     Pairs record beams to plan beams by normalized name (stripping ':TX').
+    If use_nominal_spot_size is True (the default), the delivered dose is
+    reconstructed using the nominal plan spot sizes (sigma_rx), isolating
+    spot steering and meterset delivery from machine nozzle spot size drift.
+    Delivered spot sizes reported in the record are still tracked and logged
+    for machine QA trend monitoring.
     """
+    if use_nominal_spot_size is None:
+        use_nominal_spot_size = getattr(settings, "LOG_RECON_USE_NOMINAL_SPOT_SIZE", True)
+
     plan_ds = pydicom.dcmread(plan_path, force=True)
     record_ds = pydicom.dcmread(record_path, force=True)
 
@@ -316,9 +330,32 @@ def reconstruct_from_record(plan_path: str, record_path: str) -> LogReconstructi
         # Delivered profile -- drop test pulses (SpotIndex == 0) and zero-MU spots
         dmask = dv[:, 0] != 0
         d = dv[dmask]
+
+        if use_nominal_spot_size and rx.size > 0:
+            # Map each delivered spot to its energy layer's nominal spot size from the plan.
+            # rx cols: [Energy, RxMU, SizeX, SizeY, PosX, PosY, Layer]
+            # d cols:  [SpotIndex, Energy, DeliveredMU, SizeX, SizeY, PosX, PosY, Layer]
+            layer_sizes = {int(row[6]): (float(row[2]), float(row[3])) for row in rx}
+            energy_sizes = {round(float(row[0]), 2): (float(row[2]), float(row[3])) for row in rx}
+
+            sig_x = np.zeros(len(d), dtype=float)
+            sig_y = np.zeros(len(d), dtype=float)
+            for k in range(len(d)):
+                l_idx = int(d[k, 7])
+                if l_idx in layer_sizes:
+                    sx, sy = layer_sizes[l_idx]
+                else:
+                    e_val = round(float(d[k, 1]), 2)
+                    sx, sy = energy_sizes.get(e_val, (float(d[k, 3]), float(d[k, 4])))
+                sig_x[k] = sx / 2.355
+                sig_y[k] = sy / 2.355
+        else:
+            sig_x = d[:, 3] / 2.355
+            sig_y = d[:, 4] / 2.355
+
         d_dose = _reconstruct_profile(
             d[:, 5], d[:, 6],
-            d[:, 3] / 2.355, d[:, 4] / 2.355, d[:, 2],
+            sig_x, sig_y, d[:, 2],
         )
 
         x_off, y_off, mu_err, rx_mu, rx_sizes, dv_sizes = _spot_metrics(rx, dv)

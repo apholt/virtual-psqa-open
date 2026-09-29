@@ -662,6 +662,7 @@ def _reconstruct_single_fraction(
         "fraction": fx,
         "treatment_date": tdate,
         "machine": machine,
+        "use_nominal_spot_size": settings.LOG_RECON_USE_NOMINAL_SPOT_SIZE,
         "is_interrupted": interruption_info["is_interrupted"],
         "interruption_reason": interruption_info["interruption_reason"],
         "interruption_type": interruption_info["interruption_type"],
