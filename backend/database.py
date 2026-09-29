@@ -123,10 +123,32 @@ def ensure_schema():
                     cur.execute(f"ALTER TABLE synthetic_cts ADD COLUMN {col_name} {col_type};")
             raw_conn.commit()
 
+        # Ensure ml_predictions table exists
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS ml_predictions (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id               INTEGER NOT NULL,
+            model_version         VARCHAR(64) NOT NULL,
+            pass_probability      FLOAT NOT NULL,
+            confidence            VARCHAR(16) NOT NULL,
+            verdict               VARCHAR(32) NOT NULL,
+            feature_vector        TEXT NOT NULL,
+            evidence_available    TEXT NOT NULL,
+            created_at            DATETIME NOT NULL,
+            physical_outcome      BOOLEAN,
+            physical_passing_rate FLOAT,
+            outcome_recorded_at   DATETIME,
+            FOREIGN KEY (plan_id) REFERENCES plans (id)
+        );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_ml_predictions_plan_id ON ml_predictions (plan_id);")
+        raw_conn.commit()
+
         cur.close()
         raw_conn.close()
     except Exception:
         pass
+
 
 
 ensure_schema()

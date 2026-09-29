@@ -31,6 +31,8 @@ class Plan(Base):
     gamma_results: Mapped[List["GammaResult"]] = relationship(back_populates="plan", cascade="all, delete-orphan")
     synthetic_cts: Mapped[List["SyntheticCT"]] = relationship(back_populates="plan", cascade="all, delete-orphan")
     chart_checks: Mapped[List["ChartCheck"]] = relationship(back_populates="plan", cascade="all, delete-orphan")
+    ml_predictions: Mapped[List["MLPrediction"]] = relationship(back_populates="plan", cascade="all, delete-orphan")
+
 
     @property
     def patient_identifier(self) -> Optional[str]:

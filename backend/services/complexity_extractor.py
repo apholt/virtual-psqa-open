@@ -136,6 +136,18 @@ def _prescribed_dose_gy(dcm: pydicom.Dataset) -> Optional[float]:
 def _load_rtplan(plan: Plan) -> pydicom.Dataset:
     """Load the RTIonPlan dataset from the plan's dicom_store folder."""
     store = Path(plan.dicom_store_path)
+    if not store.exists():
+        candidates = [
+            Path.cwd() / plan.dicom_store_path,
+            Path(__file__).resolve().parent.parent / plan.dicom_store_path,
+            Path(__file__).resolve().parent.parent.parent / plan.dicom_store_path,
+            Path.cwd() / "data" / "dicom_store" / Path(plan.dicom_store_path).name,
+            Path(__file__).resolve().parent.parent / "data" / "dicom_store" / Path(plan.dicom_store_path).name,
+        ]
+        for c in candidates:
+            if c.exists():
+                store = c
+                break
     for f in store.glob("*.dcm"):
         try:
             dcm = pydicom.dcmread(str(f), stop_before_pixels=True)
@@ -146,6 +158,7 @@ def _load_rtplan(plan: Plan) -> pydicom.Dataset:
         ):
             return dcm
     raise FileNotFoundError(f"No RTPlan DICOM found in {store}")
+
 
 
 def extract_features(plan_id: int, db: Session) -> dict:

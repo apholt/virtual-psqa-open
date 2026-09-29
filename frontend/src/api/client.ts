@@ -37,7 +37,12 @@ import type {
   AuditLogItem,
   AuditLogStats,
   AuditLogParams,
+  ModelPerformance,
+  RetrainResponse,
+  PredictionResponse,
+  PredictionRecord,
 } from "../types";
+
 
 const api = axios.create({
   baseURL: "/api",
@@ -611,7 +616,36 @@ export const getAuditLogs = async (
 export const getAuditLogStats = () =>
   api.get<AuditLogStats>("/auth/audit-logs/stats").then((r) => r.data);
 
+// ---------------------------------------------------------------------------
+// Machine Learning Prediction Engine API (§ 15)
+// ---------------------------------------------------------------------------
+
+export const getModelPerformance = (target: string = "log") =>
+  api.get<ModelPerformance>("/ml/performance", { params: { target } }).then((r) => r.data);
+
+export const retrainModel = (target: string = "log", force: boolean = false) =>
+  api.post<RetrainResponse>("/ml/retrain", null, { params: { target, force } }).then((r) => r.data);
+
+export const getModelHistory = () =>
+  api.get<any[]>("/ml/history").then((r) => r.data);
+
+export const predictPlan = (planId: number) =>
+  api.post<PredictionResponse>(`/ml/plans/${planId}/predict`).then((r) => r.data);
+
+export const getPlanPrediction = (planId: number) =>
+  api.get<PredictionRecord>(`/ml/plans/${planId}/prediction`).then((r) => r.data);
+
+export const getPlanPredictions = (planId: number) =>
+  api.get<PredictionRecord[]>(`/ml/plans/${planId}/predictions`).then((r) => r.data);
+
+export const recordPlanOutcome = (
+  planId: number,
+  payload: { physical_outcome: boolean; physical_passing_rate?: number }
+) =>
+  api.post<PredictionRecord>(`/ml/plans/${planId}/outcome`, payload).then((r) => r.data);
+
 export default api;
+
 
 
 

@@ -119,10 +119,21 @@ def _store_prediction(plan_id: int) -> int:
         else:
             logger.info(f"[Stage 1] no prediction stored for plan {plan_id} "
                         f"(no room model yet, or plan file unreadable)")
+        
+        # Also run ML prediction engine (§15)
+        try:
+            from database import SessionLocal
+            from services import ml_predictor
+            with SessionLocal() as db:
+                ml_predictor.predict(plan_id, db)
+        except Exception as ml_exc:
+            logger.warning(f"[Stage 1] ML prediction for plan {plan_id} skipped/failed: {ml_exc}")
+
         return n
     except Exception as exc:  # noqa: BLE001
         logger.error(f"Prediction failed for plan {plan_id}: {exc}")
         return 0
+
 
 
 def _evaluate_gate(plan_id: int):

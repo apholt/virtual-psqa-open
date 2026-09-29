@@ -17,9 +17,11 @@ interface TopbarProps {
 
 const NAV = [
   { to: "/", label: "Dashboard" },
+  { to: "/model-insights", label: "Model Insights" },
   { to: "/audit-logs", label: "Audit Logs" },
   { to: "/settings", label: "Settings" },
 ];
+
 
 function useClock(): string {
   const [now, setNow] = useState(() => new Date());

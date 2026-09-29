@@ -152,6 +152,13 @@ class Settings(BaseSettings):
     COUCH_SHELL_DENSITY_OVERRIDE: Optional[float] = None
     COUCH_SHELL_DENSITY_SCALE: Optional[float] = None
 
+    # Machine learning prediction engine (§15)
+    ML_MODEL_DIR: str = "./ml/models"
+    ML_RETRAIN_MIN_CASES: int = 50
+    ML_APPROVE_PROBABILITY: float = 0.92
+    ML_FLAG_PROBABILITY: float = 0.80
+
+
 
 settings = Settings()
 

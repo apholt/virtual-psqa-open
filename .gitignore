@@ -44,3 +44,9 @@ backend/.pytest_cache/
 # Frontend dependencies & build artifacts
 frontend/node_modules/
 frontend/dist/
+
+# Trained ML model weights and logs
+backend/ml/models/*.joblib
+backend/ml/models/*.json
+!backend/ml/models/.gitkeep
+

@@ -55,6 +55,7 @@ from routers import (
     results,
     settings_router,
     synthetic_ct,
+    ml,
 )
 from middleware.auth_middleware import AuthMiddleware
 from services.folder_watcher import DicomFolderWatcher
@@ -354,6 +355,8 @@ app.include_router(monitoring.router)
 app.include_router(synthetic_ct.router)
 app.include_router(oir.router)
 app.include_router(orthanc_router.router)
+app.include_router(ml.router)
+
 
 
 # Serve built React frontend

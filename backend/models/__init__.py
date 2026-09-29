@@ -8,6 +8,7 @@ from .synthetic_ct import SyntheticCT
 from .user import User
 from .audit_log import AuditLog
 from .chart_check import ChartCheck
+from .ml_prediction import MLPrediction
 
 __all__ = [
     "Patient",
@@ -19,6 +20,8 @@ __all__ = [
     "User",
     "AuditLog",
     "ChartCheck",
+    "MLPrediction",
 ]
+
 
 

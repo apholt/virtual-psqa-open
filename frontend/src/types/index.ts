@@ -1069,3 +1069,81 @@ export interface AuditLogParams {
   start_date?: string;
   end_date?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Machine Learning Prediction Engine Types (§ 15)
+// ---------------------------------------------------------------------------
+
+export type Confidence = "high" | "moderate" | "low";
+export type Verdict = "virtual_approve" | "flag" | "measure";
+export type EvidenceLayer = "complexity" | "mcSquare" | "log" | "physical";
+
+export interface PredictionRecord {
+  id: number;
+  plan_id: number;
+  model_version: string;
+  pass_probability: number;
+  confidence: Confidence;
+  verdict: Verdict;
+  evidence_available: EvidenceLayer[];
+  feature_vector: Record<string, number>;
+  created_at: string;
+  physical_outcome: boolean | null;
+  physical_passing_rate: number | null;
+  outcome_recorded_at?: string | null;
+}
+
+export interface PredictionResponse extends PredictionRecord {
+  prediction_id: number;
+  evidence_missing: EvidenceLayer[];
+}
+
+export interface ConfusionMatrix {
+  tn: number;
+  fp: number;
+  fn: number;
+  tp: number;
+}
+
+export interface ModelMetrics {
+  auc: number;
+  accuracy: number;
+  sensitivity: number;
+  specificity: number;
+  ppv: number;
+  npv: number;
+  confusion_matrix: ConfusionMatrix;
+}
+
+export interface ModelPerformance {
+  trained: boolean;
+  algorithm: string;
+  version: string;
+  n_samples: number;
+  labelled_outcomes: number;
+  required_to_train: number;
+  required_samples?: number;
+  n_plans?: number;
+  required_plans?: number;
+  metrics: ModelMetrics | null;
+  feature_importances: Record<string, number> | null;
+  trained_at?: string;
+  message?: string;
+  target?: string;
+}
+
+export interface RetrainResponse {
+  status: string;
+  n_samples?: number;
+  required?: number;
+  required_samples?: number;
+  n_plans?: number;
+  required_plans?: number;
+  message?: string;
+  version?: string;
+  algorithm?: string;
+  metrics?: ModelMetrics;
+  feature_importances?: Record<string, number>;
+  target?: string;
+}
+
