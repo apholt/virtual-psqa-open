@@ -56,6 +56,7 @@ from routers import (
     settings_router,
     synthetic_ct,
     ml,
+    cluster_router,
 )
 from middleware.auth_middleware import AuthMiddleware
 from services.folder_watcher import DicomFolderWatcher
@@ -356,6 +357,7 @@ app.include_router(synthetic_ct.router)
 app.include_router(oir.router)
 app.include_router(orthanc_router.router)
 app.include_router(ml.router)
+app.include_router(cluster_router.router)
 
 
 

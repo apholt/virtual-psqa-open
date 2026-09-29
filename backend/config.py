@@ -159,6 +159,14 @@ class Settings(BaseSettings):
     ML_APPROVE_PROBABILITY: float = 0.92
     ML_FLAG_PROBABILITY: float = 0.80
 
+    # Distributed MCsquare cluster computing
+    CLUSTER_ENABLED: bool = False
+    CLUSTER_NODES: list[str] = []
+    CLUSTER_TIMEOUT_SECONDS: int = 1800
+    CLUSTER_STORAGE_MODE: str = "http"  # 'http' or 'shared_folder'
+    CLUSTER_SHARED_PATH: Optional[str] = None
+    CLUSTER_IDLE_MINUTES: float = 5.0
+    CLUSTER_MAX_CPU_PCT: float = 30.0
 
 
 settings = Settings()

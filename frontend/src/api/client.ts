@@ -644,6 +644,31 @@ export const recordPlanOutcome = (
 ) =>
   api.post<PredictionRecord>(`/ml/plans/${planId}/outcome`, payload).then((r) => r.data);
 
+// ---------------------------------------------------------------------------
+// Distributed MCsquare Cluster API
+// ---------------------------------------------------------------------------
+
+export const getClusterStatus = () =>
+  api.get<{ enabled: boolean; storage_mode: string; total_nodes: number; online_nodes: number; idle_nodes: number; total_cores: number; active_jobs: number; nodes: any[] }>("/cluster/status").then((r) => r.data);
+
+export const getClusterNodes = () =>
+  api.get<any[]>("/cluster/nodes").then((r) => r.data);
+
+export const addClusterNode = (payload: { name?: string; url: string; enabled?: boolean }) =>
+  api.post<any>("/cluster/nodes", payload).then((r) => r.data);
+
+export const deleteClusterNode = (nodeId: string) =>
+  api.delete<{ success: boolean; message: string }>(`/cluster/nodes/${nodeId}`).then((r) => r.data);
+
+export const testClusterNode = (nodeId: string) =>
+  api.post<any>(`/cluster/nodes/${nodeId}/test`).then((r) => r.data);
+
+export const toggleClusterNode = (nodeId: string) =>
+  api.post<any>(`/cluster/nodes/${nodeId}/toggle`).then((r) => r.data);
+
+export const toggleCluster = (enabled: boolean) =>
+  api.post<any>("/cluster/toggle", { enabled }).then((r) => r.data);
+
 export default api;
 
 

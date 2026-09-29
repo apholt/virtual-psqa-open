@@ -1147,3 +1147,32 @@ export interface RetrainResponse {
   target?: string;
 }
 
+export interface ClusterNode {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  is_online: boolean;
+  is_idle: boolean;
+  status: "idle" | "busy" | "user_active" | "offline" | "disabled" | string;
+  cores: number;
+  cpu_pct: number;
+  idle_seconds: number;
+  hostname?: string;
+  os?: string;
+  last_seen?: string;
+  active_task?: string | null;
+}
+
+export interface ClusterStatus {
+  enabled: boolean;
+  storage_mode: string;
+  total_nodes: number;
+  online_nodes: number;
+  idle_nodes: number;
+  total_cores: number;
+  active_jobs: number;
+  nodes: ClusterNode[];
+}
+
+

@@ -280,6 +280,27 @@ def run_mcSquare(
     if _should_mock():
         return _mock_simulate(plan_id, output_dir, job_id, db, force=force)
 
+    # Check if distributed cluster computing is enabled and available
+    if getattr(settings, "CLUSTER_ENABLED", False):
+        try:
+            from services.cluster.coordinator import ClusterCoordinator
+            coordinator = ClusterCoordinator()
+            cluster_result = coordinator.simulate_plan_cluster(
+                plan_id=plan_id,
+                output_dir=Path(output_dir),
+                job_id=job_id,
+                db=db,
+                force=force,
+            )
+            if cluster_result is not None:
+                _update_progress(db, job_id, 1.0, force=True)
+                return cluster_result
+        except Exception as cluster_exc:
+            logger.warning(
+                f"Cluster simulation encountered error for plan {plan_id}: {cluster_exc}. "
+                f"Gracefully falling back to local worker..."
+            )
+
     return _run_worker(plan_id, output_dir, job_id, db, force=force)
 
 
