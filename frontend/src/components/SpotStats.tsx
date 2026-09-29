@@ -124,8 +124,9 @@ export function SpotStats({ planId }: { planId: number }) {
                   <th style={th}>Pos max</th>
                   <th style={th}>σx / σy</th>
                   <th style={th}>MU/spot max</th>
-                  <th style={th}>Spot size x</th>
-                  <th style={th}>Spot size y</th>
+                  <th style={th} title="Dynamic spot size range across all energy layers in this beam">Spot size x</th>
+                  <th style={th} title="Dynamic spot size range across all energy layers in this beam">Spot size y</th>
+                  <th style={th} title="Maximum absolute difference between plan-nominal and record-reported spot size">ΔSize max</th>
                 </tr>
               </thead>
               <tbody>
@@ -145,11 +146,14 @@ export function SpotStats({ planId }: { planId: number }) {
                       {fmt(b.pos_std_dx_mm, 2)} / {fmt(b.pos_std_dy_mm, 2)} mm
                     </td>
                     <td style={td}>{fmt(b.mu_err_max_abs_pct, 1, "%")}</td>
-                    <td style={td}>
+                    <td style={td} title="Dynamic range (min–max) across layers">
                       {fmt(b.size_x_min_mm, 1)}{"\u2013"}{fmt(b.size_x_max_mm, 1)} mm
                     </td>
-                    <td style={td}>
+                    <td style={td} title="Dynamic range (min–max) across layers">
                       {fmt(b.size_y_min_mm, 1)}{"\u2013"}{fmt(b.size_y_max_mm, 1)} mm
+                    </td>
+                    <td style={td}>
+                      {b.size_is_plan_echo ? "0.00 mm (echo)" : fmt(b.size_max_abs_diff_mm, 2, " mm")}
                     </td>
                   </tr>
                 ))}
