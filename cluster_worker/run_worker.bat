@@ -11,6 +11,13 @@ if not exist "%MCSQUARE_DIR%" (
     set MCSQUARE_DIR=.\MCsquare
 )
 
+echo Checking dependencies...
+python -c "import fastapi, uvicorn, numpy, multipart" 2>nul
+if %errorlevel% neq 0 (
+    echo Installing minimal worker dependencies (fastapi, uvicorn, numpy, python-multipart)...
+    python -m pip install -r requirements.txt
+)
+
 echo Starting worker node on port %PORT% using %MCSQUARE_DIR%...
 echo This workstation will automatically calculate beams when idle.
 echo If a user is active, calculations will automatically yield.
