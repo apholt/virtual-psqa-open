@@ -460,11 +460,20 @@ def _synthesize_composite_dose(beam_doses: dict[int, DoseGrid]) -> Optional[Dose
     return DoseGrid(array=total_array, spacing=ref.spacing, origin=ref.origin)
 
 
+_DOSE_STATUS_CACHE: dict[int, dict] = {}
+
+
 def clear_dose_caches() -> None:
     """Flushes scan, mask, and resample caches (e.g. after uploading new dose files)."""
     _STORE_SCAN_CACHE.clear()
     _EXTERNAL_MASK_CACHE.clear()
     _RESAMPLE_CACHE.clear()
+    _DOSE_STATUS_CACHE.clear()
+    try:
+        from routers.plans import clear_plan_fields_cache
+        clear_plan_fields_cache()
+    except Exception:
+        pass
     try:
         from services.dose_cache import clear_dose_cache
         clear_dose_cache()
@@ -1229,6 +1238,9 @@ def check_plan_dose_status(plan_id: int, db: Session) -> dict:
     - Identifies missing plan dose and missing beam numbers/names
     - Provides actionable warning messages for the user
     """
+    if plan_id in _DOSE_STATUS_CACHE:
+        return _DOSE_STATUS_CACHE[plan_id]
+
     plan = db.query(Plan).filter_by(id=plan_id).first()
     if plan is None:
         raise ValueError(f"Plan {plan_id} not found")
@@ -1301,7 +1313,7 @@ def check_plan_dose_status(plan_id: int, db: Session) -> dict:
     elif is_plan_dose_synthesized:
         status = "synthesized"
 
-    return {
+    res = {
         "plan_id": plan_id,
         "plan_label": plan.plan_label,
         "number_of_fields": plan.number_of_fields,
@@ -1318,3 +1330,5 @@ def check_plan_dose_status(plan_id: int, db: Session) -> dict:
         "status": status,
         "warnings": warnings,
     }
+    _DOSE_STATUS_CACHE[plan_id] = res
+    return res

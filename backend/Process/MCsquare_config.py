@@ -30,7 +30,8 @@ def generate_MCsquare_config(WorkDir, NumberOfPrimaries, Scanner_folder, BDL_fil
   config["WorkDir"] = WorkDir
 
   # Simulation parameters
-  config["Num_Threads"] = 12
+  cpu_count = os.cpu_count() or 4
+  config["Num_Threads"] = int(os.environ.get("MCSQUARE_NUM_THREADS", max(1, cpu_count - 1)))
   config["RNG_Seed"] = 0
   config["Num_Primaries"] = NumberOfPrimaries
   config["E_Cut_Pro"] = 0.5

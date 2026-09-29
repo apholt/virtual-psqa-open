@@ -146,10 +146,9 @@ def test_multi_beamset_ingestion_and_dose_segregation(test_db, tmp_path, monkeyp
     assert d2_ds.SOPInstanceUID != comp_uid
 
     # Verify patient worklist API returns plan_count == 2 and both plans
-    import asyncio
     from routers.patients import list_patients
 
-    patients_resp = asyncio.run(list_patients(db=test_db))
+    patients_resp = list_patients(db=test_db)
     assert len(patients_resp) == 1
     pat_item = patients_resp[0]
     assert pat_item.plan_count == 2

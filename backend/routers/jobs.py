@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 
 @router.post("", response_model=QAJobResponse)
-async def create_job(payload: QAJobCreate, db: Session = Depends(get_db)):
+def create_job(payload: QAJobCreate, db: Session = Depends(get_db)):
     """Creates a QA job record (without starting it)."""
     job = QAJob(
         plan_id=payload.plan_id,
@@ -26,7 +26,7 @@ async def create_job(payload: QAJobCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/run", response_model=QAJobResponse)
-async def run_job(
+def run_job(
     payload: QAJobCreate,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -60,7 +60,7 @@ async def run_job(
 
 
 @router.post("/{job_id}/cancel", response_model=QAJobResponse)
-async def cancel_job(job_id: int, db: Session = Depends(get_db)):
+def cancel_job(job_id: int, db: Session = Depends(get_db)):
     """Requests cooperative cancellation of a running job."""
     job = db.query(QAJob).filter_by(id=job_id).first()
     if not job:
@@ -74,13 +74,13 @@ async def cancel_job(job_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{job_id}/stop", response_model=QAJobResponse)
-async def stop_job(job_id: int, db: Session = Depends(get_db)):
+def stop_job(job_id: int, db: Session = Depends(get_db)):
     """Stops/cancels a running QA job cooperatively while preserving partial cached results."""
-    return await cancel_job(job_id=job_id, db=db)
+    return cancel_job(job_id=job_id, db=db)
 
 
 @router.get("/{job_id}", response_model=QAJobResponse)
-async def get_job(job_id: int, db: Session = Depends(get_db)):
+def get_job(job_id: int, db: Session = Depends(get_db)):
     job = db.query(QAJob).filter_by(id=job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -88,7 +88,7 @@ async def get_job(job_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/plan/{plan_id}", response_model=list[QAJobResponse])
-async def list_plan_jobs(plan_id: int, db: Session = Depends(get_db)):
+def list_plan_jobs(plan_id: int, db: Session = Depends(get_db)):
     return (
         db.query(QAJob)
         .filter_by(plan_id=plan_id)

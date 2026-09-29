@@ -24,7 +24,7 @@ router = APIRouter(prefix="/api/patients", tags=["patients"])
 
 
 @router.get("", response_model=list[PatientWithLatestPlan])
-async def list_patients(
+def list_patients(
     status: Optional[str] = Query(None, description="Filter by qa_status"),
     site: Optional[str] = Query(None, description="Filter by treatment_site"),
     search: Optional[str] = Query(None, description="Search patient ID or name"),
@@ -86,7 +86,7 @@ async def list_patients(
 
 
 @router.get("/{patient_id}/plans", response_model=list[PlanSummary])
-async def get_patient_plans(patient_id: int, db: Session = Depends(get_db)):
+def get_patient_plans(patient_id: int, db: Session = Depends(get_db)):
     """Returns all plans for a patient with QA status."""
     plans = (
         db.query(Plan)
@@ -98,7 +98,7 @@ async def get_patient_plans(patient_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/{patient_id}")
-async def delete_patient(patient_id: str, db: Session = Depends(get_db)):
+def delete_patient(patient_id: str, db: Session = Depends(get_db)):
     """
     Permanently removes a patient and all associated plans, QA jobs,
     fractions, synthetic CTs, chart checks, and gamma evaluations from the database.

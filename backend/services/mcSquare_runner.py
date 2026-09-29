@@ -58,12 +58,29 @@ def _plan_input_dir(plan_id: int) -> Path:
     return Path(settings.RESULTS_PATH) / f"plan_{plan_id}" / "mcSquare_input"
 
 
-def _update_progress(db: Session, job_id: int, progress: float) -> None:
+_LAST_PROGRESS_UPDATE: dict[int, tuple[float, float]] = {}
+
+
+def _update_progress(db: Session, job_id: int, progress: float, force: bool = False) -> None:
     from models.qa_job import QAJob
+    import time
+
+    now = time.monotonic()
+    clamped = max(0.0, min(1.0, progress))
+    last_val, last_time = _LAST_PROGRESS_UPDATE.get(job_id, (-1.0, 0.0))
+
+    if not force and clamped < 1.0:
+        # Throttle: commit at most once every 1.0s or every 2% progress
+        if (clamped - last_val) < 0.02 and (now - last_time) < 1.0:
+            return
+
+    _LAST_PROGRESS_UPDATE[job_id] = (clamped, now)
+    if clamped >= 1.0:
+        _LAST_PROGRESS_UPDATE.pop(job_id, None)
 
     job = db.query(QAJob).filter_by(id=job_id).first()
     if job:
-        job.progress = max(0.0, min(1.0, progress))
+        job.progress = clamped
         db.commit()
 
 

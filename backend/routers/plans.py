@@ -87,6 +87,7 @@ async def upload_dicom(
                     if plan and plan.qa_status != "pending_plan":
                         background_tasks.add_task(run_stage1, pid, False)
 
+    clear_plan_fields_cache()
     return PlanIngestionResponse(**result)
 
 
@@ -165,9 +166,23 @@ async def upload_plan_records(
     return PlanIngestionResponse(**result)
 
 
+_PLAN_FIELDS_CACHE: dict[int, list[FieldSummary]] = {}
+
+
+def clear_plan_fields_cache(plan_id: Optional[int] = None) -> None:
+    """Clears cached plan fields."""
+    if plan_id is not None:
+        _PLAN_FIELDS_CACHE.pop(plan_id, None)
+    else:
+        _PLAN_FIELDS_CACHE.clear()
+
+
 @router.get("/{plan_id}/fields", response_model=list[FieldSummary])
-async def get_plan_fields(plan_id: int, db: Session = Depends(get_db)):
+def get_plan_fields(plan_id: int, db: Session = Depends(get_db)):
     """Returns per-field summary for the plan."""
+    if plan_id in _PLAN_FIELDS_CACHE:
+        return _PLAN_FIELDS_CACHE[plan_id]
+
     plan = db.query(Plan).filter_by(id=plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
@@ -189,11 +204,14 @@ async def get_plan_fields(plan_id: int, db: Session = Depends(get_db)):
         except Exception:
             continue
 
-    return [FieldSummary(**f) for f in fields]
+    res = [FieldSummary(**f) for f in fields]
+    if res:
+        _PLAN_FIELDS_CACHE[plan_id] = res
+    return res
 
 
 @router.get("/{plan_id}", response_model=PlanSummary)
-async def get_plan(plan_id: int, db: Session = Depends(get_db)):
+def get_plan(plan_id: int, db: Session = Depends(get_db)):
     plan = db.query(Plan).filter_by(id=plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
@@ -201,7 +219,7 @@ async def get_plan(plan_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{plan_id}/dose-status")
-async def get_plan_dose_status_endpoint(plan_id: int, db: Session = Depends(get_db)):
+def get_plan_dose_status_endpoint(plan_id: int, db: Session = Depends(get_db)):
     """Returns detailed status of TPS RTDOSE files (plan-level & per-beam) for the plan."""
     from services.gamma_analysis import check_plan_dose_status
     try:
@@ -331,6 +349,7 @@ async def upload_plan_doses(
 
     # Invalidate caches
     clear_dose_caches()
+    clear_plan_fields_cache(plan_id)
     clean_store_duplicates(str(dest_dir))
 
     # Evaluate updated dose status

@@ -732,6 +732,12 @@ def ingest_standalone_rtdose_files(
     fields = parse_rtplan_fields(plan_dcm) if plan_dcm else []
     patient = db.query(Patient).filter_by(id=matched_plan.patient_id).first()
 
+    try:
+        from services.gamma_analysis import clear_dose_caches
+        clear_dose_caches()
+    except Exception:
+        pass
+
     return {
         "plan_id": matched_plan.id,
         "plan_ids": [matched_plan.id],
@@ -1207,6 +1213,12 @@ def ingest_dicom_directory(upload_path: str, db: Session, target_plan_uid: Optio
     is_all_duplicates = (new_files_count == 0 and duplicate_files_count > 0)
     if is_all_duplicates:
         warnings_list.append("All uploaded files were identical duplicates of files already in the store. Skipped duplicate dose calculation.")
+
+    try:
+        from services.gamma_analysis import clear_dose_caches
+        clear_dose_caches()
+    except Exception:
+        pass
 
     return {
         "plan_id": primary_plan.id,

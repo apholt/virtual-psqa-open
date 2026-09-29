@@ -22,7 +22,11 @@ engine = create_engine(
 def _sqlite_pragmas(dbapi_conn, _):
     cur = dbapi_conn.cursor()
     cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA synchronous=NORMAL")
     cur.execute("PRAGMA busy_timeout=30000")
+    cur.execute("PRAGMA cache_size=-64000")
+    cur.execute("PRAGMA temp_store=MEMORY")
+    cur.execute("PRAGMA mmap_size=268435456")
     cur.close()
 
 

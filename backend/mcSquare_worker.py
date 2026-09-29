@@ -492,6 +492,12 @@ def main():
         beam_span = 0.83 / n_beams
 
         log(f"running {exe.name} for beam {beam_no} (cwd={mc2.WorkDir})")
+        extra_popen_kwargs = {}
+        if platform.system() == "Windows":
+            extra_popen_kwargs["creationflags"] = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+        else:
+            extra_popen_kwargs["preexec_fn"] = lambda: os.nice(10)
+
         child = subprocess.Popen(
             [str(exe), "config.txt"],
             cwd=mc2.WorkDir,
@@ -500,6 +506,7 @@ def main():
             text=True,
             bufsize=1,
             env=env,
+            **extra_popen_kwargs,
         )
 
         def _on_signal(signum, frame):
