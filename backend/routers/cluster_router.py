@@ -87,7 +87,8 @@ def toggle_node(node_id: str):
 @router.post("/toggle", response_model=ClusterStatus)
 def toggle_cluster(payload: ClusterToggleRequest):
     """Enables or disables distributed cluster computation mode globally."""
-    settings.CLUSTER_ENABLED = payload.enabled
+    from config import update_runtime_settings
+    update_runtime_settings({"CLUSTER_ENABLED": payload.enabled})
     logger.info(f"Cluster computing {'enabled' if payload.enabled else 'disabled'}")
     registry = get_node_registry()
     return registry.get_cluster_status()

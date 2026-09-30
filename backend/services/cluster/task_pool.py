@@ -90,14 +90,17 @@ class ClusterTaskPool:
                     t.lease_time = None
 
             # 2. Find eligible pending task
-            # Priority: tasks explicitly targeting this node first, then any unassigned task
+            # Priority: tasks explicitly targeting this node first, then any pending task
             candidate: Optional[QueuedTask] = None
             for t in self._tasks.values():
                 if t.status == "pending":
-                    if t.target_node_id == node_id:
+                    if t.target_node_id and (
+                        t.target_node_id.lower() == node_id.lower()
+                        or t.target_node_id.split(".")[0].lower() == node_id.split(".")[0].lower()
+                    ):
                         candidate = t
                         break
-                    elif t.target_node_id is None and candidate is None:
+                    elif candidate is None:
                         candidate = t
 
             if candidate is None:

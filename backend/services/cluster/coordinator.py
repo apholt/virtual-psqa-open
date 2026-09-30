@@ -189,19 +189,40 @@ class ClusterCoordinator:
         if str(backend_dir) not in sys.path:
             sys.path.insert(0, str(backend_dir))
 
+        ct_mhd_path = work_dir / "CT.mhd"
+        ct_raw_path = work_dir / "CT.raw"
+
         try:
-            from Process.Patient import PatientList
-            from Process.MCsquare import MCsquare_simulation
-            from Process.Plan import export_plan_for_MCsquare
+            from Process.PatientData import PatientList
+            from Process.MCsquare import MCsquare
+            from Process.MCsquare_plan import export_plan_for_MCsquare
 
+            # 1. Initialize MCsquare helper
+            mc2 = MCsquare()
+            mc2.WorkDir = str(work_dir)
+            mc2.init_simulation_directory()
+
+            # 2. Load patient DICOM store
             patients = PatientList()
-            patients.import_patient_data(plan.dicom_store_path)
-            patient = patients[0]
-            sim_plan = patient.Plans[0]
-            ct = patient.CT
+            patients.list_dicom_files(str(plan.dicom_store_path), 1)
+            if not patients.list:
+                raise ValueError(f"No patient DICOM files found in store: {plan.dicom_store_path}")
+            patient = patients.list[0]
+            if not patient.Plans:
+                raise ValueError("No RT Ion Plan found in store")
+            patient.Plans = [patient.Plans[0]]
+            patient.RTdoses = []
+            patient.import_patient_data()
 
-            mc2 = MCsquare_simulation(str(work_dir))
-            mc2.init_simulation_directory(ct, sim_plan, bdl=getattr(settings, "MCSQUARE_BDL_NAME", "auto"))
+            CT = patient.CTimages[0]
+            sim_plan = patient.Plans[0]
+
+            # 3. Export CT geometry if not already generated
+            if not ct_mhd_path.exists() or not ct_raw_path.exists():
+                logger.info(f"Generating CT.mhd / CT.raw in {work_dir}...")
+                mc2.export_CT_for_MCsquare(CT, str(ct_mhd_path), mc2.Crop_CT_contour)
+
+            mc2.BDL.import_BDL()
         except Exception as prep_exc:
             logger.warning(
                 f"Failed to prepare CT geometry locally for cluster dispatch: {prep_exc}. "
@@ -209,8 +230,6 @@ class ClusterCoordinator:
             )
             return None
 
-        ct_mhd_path = work_dir / "CT.mhd"
-        ct_raw_path = work_dir / "CT.raw"
         if not ct_mhd_path.exists() or not ct_raw_path.exists():
             logger.warning("CT.mhd / CT.raw missing after prep. Falling back to local runner.")
             return None
@@ -238,8 +257,10 @@ class ClusterCoordinator:
             sub_plan.Beams = [beam]
 
             plan_pencil_path = work_dir / f"PlanPencil_beam{beam_no}.txt"
-            export_plan_for_MCsquare(sub_plan, str(plan_pencil_path), ct, mc2.BDL)
+            export_plan_for_MCsquare(sub_plan, str(plan_pencil_path), CT, mc2.BDL)
             pencil_text = plan_pencil_path.read_text(encoding="utf-8")
+
+            delivered_protons = float(getattr(sub_plan, "DeliveredProtons", 1.0e9))
 
             req = BeamTaskRequest(
                 job_id=job_id,
@@ -248,7 +269,7 @@ class ClusterCoordinator:
                 field_index=i,
                 total_fields=n_beams,
                 plan_pencil_text=pencil_text,
-                delivered_protons=float(sub_plan.DeliveredProtons),
+                delivered_protons=delivered_protons,
                 primaries=settings.MCSQUARE_PRIMARIES,
                 uncertainty=settings.MCSQUARE_STAT_UNCERTAINTY,
                 dose_scaling=0.9,
@@ -336,7 +357,7 @@ class ClusterCoordinator:
         """Executes a single beam locally as a fallback mechanism."""
         import copy
         import subprocess
-        from Process.Plan import export_plan_for_MCsquare
+        from Process.MCsquare_plan import export_plan_for_MCsquare
         from Process.MCsquare_config import generate_MCsquare_config, export_MCsquare_config
         from config import _resolve_default_mcsquare_exe
 

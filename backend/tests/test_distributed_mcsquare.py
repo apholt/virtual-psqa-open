@@ -456,4 +456,35 @@ def test_heartbeat_returns_cluster_idle_config():
     assert data["idle_minutes"] == getattr(settings, "CLUSTER_IDLE_MINUTES", 5.0)
 
 
+def test_task_pool_resilient_hostname_matching():
+    """Verify that pull workers with FQDN or casing differences match assigned tasks."""
+    from services.cluster.task_pool import ClusterTaskPool
+    from services.cluster.models import BeamTaskRequest
+
+    pool = ClusterTaskPool()
+    req = BeamTaskRequest(
+        job_id=1,
+        plan_id=10,
+        beam_no=1,
+        field_index=0,
+        total_fields=1,
+        plan_pencil_text="MOCK",
+        delivered_protons=1.0e9,
+    )
+    # Enqueued targeting PCFAPPL2
+    task = pool.enqueue_task(
+        req=req,
+        ct_mhd_bytes=b"MHD",
+        ct_raw_bytes=b"RAW",
+        output_beam_path=Path("/tmp/test_out.npz"),
+        target_node_id="PCFAPPL2",
+    )
+
+    # Worker polling with FQDN PCFAPPL2.TNONC.com
+    polled = pool.poll_task(node_id="PCFAPPL2.TNONC.com", is_idle=True)
+    assert polled is not None
+    assert polled["task_id"] == task.task_id
+
+
+
 
