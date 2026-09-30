@@ -52,9 +52,50 @@ class ClusterCoordinator:
         monitors simulation execution, and downloads the resulting dose grid.
         """
         logger.info(
-            f"Dispatching Beam {req.beam_no} of Plan {req.plan_id} to node '{node.name}' ({node.url})..."
+            f"Dispatching Beam {req.beam_no} of Plan {req.plan_id} to node '{node.name}' (mode={node.mode}, {node.url})..."
         )
         start_time = time.monotonic()
+
+        # 1. Worker-Pull (outbound-only) workflow
+        if getattr(node, "mode", "push") == "pull":
+            from services.cluster.task_pool import get_task_pool
+            pool = get_task_pool()
+            task = pool.enqueue_task(
+                req=req,
+                ct_mhd_bytes=ct_mhd_bytes,
+                ct_raw_bytes=ct_raw_bytes,
+                output_beam_path=output_beam_path,
+                target_node_id=node.id,
+            )
+            logger.info(
+                f"Enqueued Beam {req.beam_no} to task pool for pull worker '{node.name}'. "
+                f"Waiting for completion (timeout={timeout_seconds}s)..."
+            )
+            finished = task.done_event.wait(timeout=timeout_seconds)
+            if not finished or task.status != "completed" or not task.result_bytes:
+                pool.remove_task(task.task_id)
+                raise RuntimeError(
+                    task.error or f"Pull worker '{node.name}' failed to complete task within timeout."
+                )
+
+            output_beam_path.parent.mkdir(parents=True, exist_ok=True)
+            output_beam_path.write_bytes(task.result_bytes)
+            duration = time.monotonic() - start_time
+            pool.remove_task(task.task_id)
+
+            logger.info(
+                f"Successfully completed Beam {req.beam_no} on pull worker '{node.name}' "
+                f"in {duration:.1f}s (max={task.max_dose:.4f} Gy)"
+            )
+            return BeamTaskResult(
+                success=True,
+                beam_no=req.beam_no,
+                max_dose=task.max_dose,
+                dose_shape=task.dose_shape,
+                duration_seconds=duration,
+            )
+
+        # 2. Worker-Push (inbound HTTP) workflow
 
         files = {
             "ct_mhd": ("CT.mhd", ct_mhd_bytes, "application/octet-stream"),

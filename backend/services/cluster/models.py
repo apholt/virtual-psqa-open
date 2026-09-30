@@ -8,6 +8,7 @@ class ClusterNode(BaseModel):
     id: str
     name: str
     url: str
+    mode: str = "push"  # "push" (server connects to worker) or "pull" (worker polls server outbound)
     enabled: bool = True
     is_online: bool = False
     is_idle: bool = False
@@ -24,7 +25,32 @@ class ClusterNode(BaseModel):
 class NodeRegistrationRequest(BaseModel):
     name: Optional[str] = None
     url: str
+    mode: str = "push"
     enabled: bool = True
+
+
+class WorkerHeartbeatRequest(BaseModel):
+    node_id: str
+    name: Optional[str] = None
+    hostname: Optional[str] = None
+    os: Optional[str] = None
+    cores: int = 1
+    cpu_pct: float = 0.0
+    idle_seconds: float = 0.0
+    is_idle: bool = True
+    status: str = "idle"
+    mode: str = "pull"
+
+
+class WorkerPollRequest(BaseModel):
+    node_id: str
+    is_idle: bool = True
+
+
+class WorkerAbortRequest(BaseModel):
+    task_id: str
+    node_id: str
+    reason: str = "user_active"
 
 
 class BeamTaskRequest(BaseModel):

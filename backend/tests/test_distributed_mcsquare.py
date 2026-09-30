@@ -280,3 +280,113 @@ def test_cluster_coordinator_failure_handling(tmp_path):
 
     finally:
         mock_server.stop()
+
+
+def test_worker_pull_workflow(tmp_path):
+    """Verifies the outbound Worker-Pull architecture: heartbeat, poll, download, result upload."""
+    import zipfile
+    import concurrent.futures
+
+    token = create_session_token("admin")
+    client = TestClient(main_app, cookies={settings.AUTH_SESSION_COOKIE: token})
+
+    node_id = "test-pull-pc"
+    # 1. Send heartbeat
+    hb_resp = client.post(
+        "/api/cluster/worker/heartbeat",
+        json={
+            "node_id": node_id,
+            "name": "Clinical-Workstation-Pull",
+            "hostname": "PCFAPPL2.TNONC.com",
+            "os": "Windows 10",
+            "cores": 16,
+            "cpu_pct": 5.0,
+            "idle_seconds": 120.0,
+            "is_idle": True,
+            "mode": "pull",
+        },
+    )
+    assert hb_resp.status_code == 200
+    assert hb_resp.json()["status"] == "ok"
+
+    # 2. Check node appears in registry
+    nodes_resp = client.get("/api/cluster/nodes")
+    assert nodes_resp.status_code == 200
+    nodes = nodes_resp.json()
+    pull_node = next((n for n in nodes if n["id"] == node_id), None)
+    assert pull_node is not None
+    assert pull_node["is_online"] is True
+    assert pull_node["mode"] == "pull"
+    assert pull_node["cores"] == 16
+
+    # 3. Simulate coordinator dispatching a beam in a background thread
+    coordinator = ClusterCoordinator()
+    c_node = ClusterNode(**pull_node)
+    req = BeamTaskRequest(
+        job_id=888,
+        plan_id=102,
+        beam_no=1,
+        field_index=0,
+        total_fields=1,
+        plan_pencil_text="MOCK_PENCIL_DATA",
+        delivered_protons=2.5e9,
+    )
+    out_beam_path = tmp_path / "mc_dose_beam1_pull.npz"
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(
+            coordinator.dispatch_remote_beam,
+            node=c_node,
+            req=req,
+            ct_mhd_bytes=b"MOCK_CT_MHD",
+            ct_raw_bytes=b"MOCK_CT_RAW",
+            output_beam_path=out_beam_path,
+            timeout_seconds=30.0,
+        )
+
+        time.sleep(0.1)
+
+        # 4. Worker polls for task
+        poll_resp = client.post("/api/cluster/worker/poll", json={"node_id": node_id, "is_idle": True})
+        assert poll_resp.status_code == 200
+        data = poll_resp.json()
+        assert data["task"] is not None
+        task_meta = data["task"]
+        task_id = task_meta["task_id"]
+        assert task_meta["plan_id"] == 102
+        assert task_meta["beam_no"] == 1
+
+        # 5. Worker downloads input bundle
+        inputs_resp = client.get(f"/api/cluster/worker/task/{task_id}/inputs")
+        assert inputs_resp.status_code == 200
+        # Verify zip contents
+        zf = zipfile.ZipFile(io.BytesIO(inputs_resp.content))
+        namelist = zf.namelist()
+        assert "CT.mhd" in namelist
+        assert "CT.raw" in namelist
+        assert "PlanPencil.txt" in namelist
+        assert zf.read("PlanPencil.txt").decode("utf-8") == "MOCK_PENCIL_DATA"
+
+        # 6. Worker creates mock dose and uploads result
+        mock_dose = np.ones((8, 8, 8), dtype=np.float32) * 3.14
+        buf = io.BytesIO()
+        np.savez_compressed(buf, array=mock_dose)
+        buf.seek(0)
+
+        up_resp = client.post(
+            f"/api/cluster/worker/task/{task_id}/result",
+            data={"max_dose": "3.14", "duration_seconds": "1.2"},
+            files={"dose_file": ("mc_dose.npz", buf.getvalue(), "application/octet-stream")},
+        )
+        assert up_resp.status_code == 200
+
+        # 7. Coordinator future resolves
+        res = future.result(timeout=5.0)
+        assert res.success is True
+        assert res.beam_no == 1
+        assert res.max_dose == 3.14
+        assert out_beam_path.exists()
+
+        with np.load(out_beam_path) as z:
+            assert np.allclose(z["array"], 3.14)
+

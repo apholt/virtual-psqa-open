@@ -13,7 +13,12 @@ from typing import Optional
 import httpx
 
 from config import settings
-from services.cluster.models import ClusterNode, ClusterStatus, NodeRegistrationRequest
+from services.cluster.models import (
+    ClusterNode,
+    ClusterStatus,
+    NodeRegistrationRequest,
+    WorkerHeartbeatRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +86,47 @@ class NodeRegistry:
             id=node_id,
             name=name,
             url=clean_url,
+            mode=getattr(req, "mode", "push"),
             enabled=req.enabled,
         )
         self._nodes[node_id] = node
         self._save_nodes()
         self.ping_node(node)
+        return node
+
+    def record_heartbeat(self, req: WorkerHeartbeatRequest) -> ClusterNode:
+        """Records a heartbeat from an outbound pull worker and updates presence."""
+        now_str = datetime.now(timezone.utc).isoformat()
+        node = self._nodes.get(req.node_id)
+        if not node:
+            # Check by hostname or auto-register
+            for existing in self._nodes.values():
+                if existing.hostname and req.hostname and existing.hostname.lower() == req.hostname.lower():
+                    node = existing
+                    break
+
+        if not node:
+            name = req.name or req.hostname or req.node_id
+            node = ClusterNode(
+                id=req.node_id,
+                name=name,
+                url=f"pull://{req.node_id}",
+                mode="pull",
+                enabled=True,
+            )
+            self._nodes[req.node_id] = node
+
+        node.mode = "pull"
+        node.is_online = True
+        node.status = req.status
+        node.is_idle = req.is_idle
+        node.cores = req.cores
+        node.cpu_pct = req.cpu_pct
+        node.idle_seconds = req.idle_seconds
+        node.hostname = req.hostname or node.hostname
+        node.os = req.os or node.os
+        node.last_seen = now_str
+        self._save_nodes()
         return node
 
     def remove_node(self, node_id: str) -> bool:
@@ -103,7 +144,25 @@ class NodeRegistry:
             node.status = "disabled"
             return node
 
-        now_str = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
+        now_str = now.isoformat()
+
+        # Handle pull workers (presence checked via recent heartbeat timestamp)
+        if node.mode == "pull":
+            if node.last_seen:
+                try:
+                    last_dt = datetime.fromisoformat(node.last_seen.replace("Z", "+00:00"))
+                    if (now - last_dt).total_seconds() < 25.0:
+                        node.is_online = True
+                        node.is_idle = (node.status == "idle")
+                        return node
+                except Exception:
+                    pass
+            node.is_online = False
+            node.is_idle = False
+            node.status = "offline"
+            return node
+
         try:
             with httpx.Client(timeout=timeout_sec) as client:
                 resp = client.get(f"{node.url}/status")
