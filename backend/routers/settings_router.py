@@ -43,6 +43,7 @@ class UpdateSettingsRequest(BaseModel):
     gamma_thresholds: Optional[dict[str, Any]] = None
     pipeline: Optional[dict[str, Any]] = None
     orthanc: Optional[dict[str, Any]] = None
+    cluster: Optional[dict[str, Any]] = None
 
 
 def _check_path_status(path_str: Optional[str], kind: str = "any") -> dict[str, Any]:
@@ -243,6 +244,14 @@ def get_settings():
             "has_password": bool(settings.ORTHANC_PASSWORD),
             "orthanc_timeout_seconds": settings.ORTHANC_TIMEOUT_SECONDS,
         },
+        "cluster": {
+            "cluster_enabled": settings.CLUSTER_ENABLED,
+            "cluster_timeout_seconds": settings.CLUSTER_TIMEOUT_SECONDS,
+            "cluster_idle_minutes": settings.CLUSTER_IDLE_MINUTES,
+            "cluster_max_cpu_pct": settings.CLUSTER_MAX_CPU_PCT,
+            "cluster_storage_mode": settings.CLUSTER_STORAGE_MODE,
+            "cluster_shared_path": settings.CLUSTER_SHARED_PATH,
+        },
     }
 
 
@@ -339,6 +348,29 @@ def update_settings_endpoint(req: UpdateSettingsRequest):
                 updates["ORTHANC_TIMEOUT_SECONDS"] = int(req.orthanc["orthanc_timeout_seconds"])
             except ValueError:
                 pass
+
+    if req.cluster:
+        if "cluster_enabled" in req.cluster:
+            updates["CLUSTER_ENABLED"] = bool(req.cluster["cluster_enabled"])
+        if "cluster_timeout_seconds" in req.cluster and req.cluster["cluster_timeout_seconds"] is not None:
+            try:
+                updates["CLUSTER_TIMEOUT_SECONDS"] = int(req.cluster["cluster_timeout_seconds"])
+            except (ValueError, TypeError):
+                pass
+        if "cluster_idle_minutes" in req.cluster and req.cluster["cluster_idle_minutes"] is not None:
+            try:
+                updates["CLUSTER_IDLE_MINUTES"] = float(req.cluster["cluster_idle_minutes"])
+            except (ValueError, TypeError):
+                pass
+        if "cluster_max_cpu_pct" in req.cluster and req.cluster["cluster_max_cpu_pct"] is not None:
+            try:
+                updates["CLUSTER_MAX_CPU_PCT"] = float(req.cluster["cluster_max_cpu_pct"])
+            except (ValueError, TypeError):
+                pass
+        if "cluster_storage_mode" in req.cluster and req.cluster["cluster_storage_mode"]:
+            updates["CLUSTER_STORAGE_MODE"] = str(req.cluster["cluster_storage_mode"])
+        if "cluster_shared_path" in req.cluster:
+            updates["CLUSTER_SHARED_PATH"] = req.cluster["cluster_shared_path"] or None
 
     applied = update_runtime_settings(updates)
     return {

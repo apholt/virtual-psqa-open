@@ -200,14 +200,24 @@ def save_settings_to_env(updates: dict[str, Any]) -> Path:
                     k = k.strip()
                     if k in updates:
                         val = updates[k]
-                        lines.append(f"{k}={val}\n")
+                        if isinstance(val, (list, dict)):
+                            import json
+                            val_str = json.dumps(val)
+                        else:
+                            val_str = str(val)
+                        lines.append(f"{k}={val_str}\n")
                         existing_keys.add(k)
                         continue
                 lines.append(raw_line)
 
     for k, v in updates.items():
         if k not in existing_keys and v is not None:
-            lines.append(f"{k}={v}\n")
+            if isinstance(v, (list, dict)):
+                import json
+                v_str = json.dumps(v)
+            else:
+                v_str = str(v)
+            lines.append(f"{k}={v_str}\n")
 
     env_path.parent.mkdir(parents=True, exist_ok=True)
     with open(env_path, "w", encoding="utf-8") as f:
@@ -236,6 +246,15 @@ def update_runtime_settings(updates: dict[str, Any]) -> dict[str, Any]:
                         val = float(val)
                     elif isinstance(cur, str):
                         val = str(val)
+                    elif isinstance(cur, list):
+                        if isinstance(val, str):
+                            import json
+                            try:
+                                val = json.loads(val)
+                            except Exception:
+                                val = [s.strip() for s in val.split(",") if s.strip()]
+                        else:
+                            val = list(val)
                 except Exception:
                     pass
             setattr(settings, k, val)

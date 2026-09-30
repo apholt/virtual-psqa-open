@@ -16,6 +16,13 @@ import {
   ShieldCheck,
   ExternalLink,
   FileText,
+  Network,
+  Plus,
+  Trash2,
+  Radio,
+  Activity,
+  Laptop,
+  Power,
 } from "lucide-react";
 import {
   getSettings,
@@ -23,8 +30,14 @@ import {
   validatePath,
   autodetectSettings,
   testOrthancConnection,
+  getClusterNodes,
+  addClusterNode,
+  deleteClusterNode,
+  testClusterNode,
+  toggleClusterNode,
+  toggleCluster,
 } from "../api/client";
-import type { SettingsData, PathStatus, OrthancStatus } from "../types";
+import type { SettingsData, PathStatus, OrthancStatus, ClusterNode } from "../types";
 import { NavBar } from "../components/NavBar";
 
 export function Settings() {
@@ -90,6 +103,28 @@ export function Settings() {
   const [testingOrthanc, setTestingOrthanc] = useState(false);
   const [orthancStatusResult, setOrthancStatusResult] = useState<OrthancStatus | null>(null);
 
+  // Distributed MCsquare Cluster State
+  const [clusterConfig, setClusterConfig] = useState<{
+    cluster_enabled: boolean;
+    cluster_timeout_seconds: number;
+    cluster_idle_minutes: number;
+    cluster_max_cpu_pct: number;
+    cluster_storage_mode: string;
+  }>({
+    cluster_enabled: false,
+    cluster_timeout_seconds: 1800,
+    cluster_idle_minutes: 5.0,
+    cluster_max_cpu_pct: 30.0,
+    cluster_storage_mode: "http",
+  });
+  const [clusterNodes, setClusterNodes] = useState<ClusterNode[]>([]);
+  const [loadingNodes, setLoadingNodes] = useState(false);
+  const [newNodeName, setNewNodeName] = useState("");
+  const [newNodeUrl, setNewNodeUrl] = useState("");
+  const [addingNode, setAddingNode] = useState(false);
+  const [testingNodeId, setTestingNodeId] = useState<string | null>(null);
+  const [togglingNodeId, setTogglingNodeId] = useState<string | null>(null);
+
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
@@ -145,6 +180,23 @@ export function Settings() {
           orthanc_password: "",
           orthanc_timeout_seconds: res.orthanc.orthanc_timeout_seconds || 120,
         });
+      }
+
+      if (res.cluster) {
+        setClusterConfig({
+          cluster_enabled: Boolean(res.cluster.cluster_enabled),
+          cluster_timeout_seconds: res.cluster.cluster_timeout_seconds ?? 1800,
+          cluster_idle_minutes: res.cluster.cluster_idle_minutes ?? 5.0,
+          cluster_max_cpu_pct: res.cluster.cluster_max_cpu_pct ?? 30.0,
+          cluster_storage_mode: res.cluster.cluster_storage_mode || "http",
+        });
+      }
+
+      try {
+        const nodes = await getClusterNodes();
+        setClusterNodes(nodes);
+      } catch {
+        // cluster router might be empty or uninitialized
       }
     } catch {
       toast.error("Failed to load settings from server.");
@@ -238,6 +290,13 @@ export function Settings() {
           orthanc_password: orthancConfig.orthanc_password ? orthancConfig.orthanc_password : null,
           orthanc_timeout_seconds: orthancConfig.orthanc_timeout_seconds,
         },
+        cluster: {
+          cluster_enabled: clusterConfig.cluster_enabled,
+          cluster_timeout_seconds: Number(clusterConfig.cluster_timeout_seconds),
+          cluster_idle_minutes: Number(clusterConfig.cluster_idle_minutes),
+          cluster_max_cpu_pct: Number(clusterConfig.cluster_max_cpu_pct),
+          cluster_storage_mode: clusterConfig.cluster_storage_mode,
+        },
       });
       toast.success("Settings saved and .env updated successfully!");
       loadData();
@@ -266,6 +325,94 @@ export function Settings() {
       toast.error("Orthanc connection test request failed.");
     } finally {
       setTestingOrthanc(false);
+    }
+  };
+
+  const refreshNodes = async () => {
+    try {
+      setLoadingNodes(true);
+      const nodes = await getClusterNodes();
+      setClusterNodes(nodes);
+      toast.success("Worker nodes status refreshed");
+    } catch {
+      toast.error("Failed to refresh cluster worker nodes.");
+    } finally {
+      setLoadingNodes(false);
+    }
+  };
+
+  const handleToggleClusterMaster = async (enabled: boolean) => {
+    try {
+      setClusterConfig((prev) => ({ ...prev, cluster_enabled: enabled }));
+      await toggleCluster(enabled);
+      toast.success(enabled ? "Cluster distribution activated" : "Cluster distribution disabled");
+    } catch {
+      toast.error("Failed to toggle cluster state.");
+    }
+  };
+
+  const handleAddNode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newNodeUrl.trim()) {
+      toast.error("Worker node URL is required (e.g. http://192.168.1.150:5055)");
+      return;
+    }
+    try {
+      setAddingNode(true);
+      await addClusterNode({
+        name: newNodeName.trim() || undefined,
+        url: newNodeUrl.trim(),
+        enabled: true,
+      });
+      toast.success("Worker node registered in cluster");
+      setNewNodeName("");
+      setNewNodeUrl("");
+      await refreshNodes();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Failed to add worker node.");
+    } finally {
+      setAddingNode(false);
+    }
+  };
+
+  const handleDeleteNode = async (nodeId: string, nodeName: string) => {
+    if (!confirm(`Remove worker node "${nodeName}" from cluster?`)) return;
+    try {
+      await deleteClusterNode(nodeId);
+      toast.success("Worker node removed");
+      setClusterNodes((prev) => prev.filter((n) => n.id !== nodeId));
+    } catch {
+      toast.error("Failed to remove worker node.");
+    }
+  };
+
+  const handleTestNode = async (nodeId: string) => {
+    try {
+      setTestingNodeId(nodeId);
+      const updated = await testClusterNode(nodeId);
+      setClusterNodes((prev) => prev.map((n) => (n.id === nodeId ? updated : n)));
+      if (updated.is_online) {
+        toast.success(`Online: ${updated.cores} cores, ${updated.cpu_pct.toFixed(0)}% CPU (${updated.status})`);
+      } else {
+        toast.error(`Node is offline or unreachable`);
+      }
+    } catch {
+      toast.error("Failed to connect to worker node.");
+    } finally {
+      setTestingNodeId(null);
+    }
+  };
+
+  const handleToggleNode = async (nodeId: string) => {
+    try {
+      setTogglingNodeId(nodeId);
+      const updated = await toggleClusterNode(nodeId);
+      setClusterNodes((prev) => prev.map((n) => (n.id === nodeId ? updated : n)));
+      toast.success(`Worker node ${updated.enabled ? "enabled" : "disabled"}`);
+    } catch {
+      toast.error("Failed to toggle worker node.");
+    } finally {
+      setTogglingNodeId(null);
     }
   };
 
@@ -534,6 +681,356 @@ export function Settings() {
                     className="w-full text-xs font-mono bg-clinical-bg border border-clinical-border rounded px-3 py-1.5 text-clinical-text"
                   />
                   <span className="text-[10px] text-clinical-muted mt-0.5 block">Physical-to-effective dose weight (1.10)</span>
+                </div>
+              </div>
+            </div>
+
+            {/* CARD: Distributed MCsquare Compute Cluster */}
+            <div className="rounded-lg border border-clinical-border bg-clinical-surface p-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-5">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+                    <Network size={20} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-sm font-semibold text-clinical-text">Distributed MCsquare Compute Cluster</h2>
+                      <span
+                        className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border flex items-center gap-1 ${
+                          clusterConfig.cluster_enabled
+                            ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                            : "bg-slate-500/10 text-slate-400 border-slate-500/20"
+                        }`}
+                      >
+                        {clusterConfig.cluster_enabled ? (
+                          <>
+                            <CheckCircle2 size={11} /> Cluster Active
+                          </>
+                        ) : (
+                          <>
+                            <Power size={11} /> Local Only
+                          </>
+                        )}
+                      </span>
+                    </div>
+                    <p className="text-xs text-clinical-muted mt-0.5">
+                      Distribute 3D Monte Carlo dose calculation beams across idle clinic workstations over the local network.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={refreshNodes}
+                    disabled={loadingNodes}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600/10 hover:bg-cyan-600/20 text-cyan-400 border border-cyan-500/30 rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw size={13} className={loadingNodes ? "animate-spin" : ""} />
+                    Refresh Status
+                  </button>
+
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={clusterConfig.cluster_enabled}
+                      onChange={(e) => handleToggleClusterMaster(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-600"></div>
+                  </label>
+                </div>
+              </div>
+
+              {/* Cluster Metric Badges */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+                <div className="p-3 rounded-lg bg-clinical-bg/50 border border-clinical-border/60">
+                  <div className="text-[11px] text-clinical-muted flex items-center gap-1 mb-1">
+                    <Laptop size={12} className="text-clinical-accent" />
+                    Total Nodes
+                  </div>
+                  <div className="text-lg font-bold text-clinical-text font-mono">
+                    {clusterNodes.length}
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-lg bg-clinical-bg/50 border border-clinical-border/60">
+                  <div className="text-[11px] text-clinical-muted flex items-center gap-1 mb-1">
+                    <CheckCircle2 size={12} className="text-emerald-400" />
+                    Available / Idle
+                  </div>
+                  <div className="text-lg font-bold text-emerald-400 font-mono">
+                    {clusterNodes.filter((n) => n.enabled && n.is_online && n.is_idle).length}
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-lg bg-clinical-bg/50 border border-clinical-border/60">
+                  <div className="text-[11px] text-clinical-muted flex items-center gap-1 mb-1">
+                    <Cpu size={12} className="text-cyan-400" />
+                    Online CPU Cores
+                  </div>
+                  <div className="text-lg font-bold text-cyan-400 font-mono">
+                    {clusterNodes.filter((n) => n.enabled && n.is_online).reduce((sum, n) => sum + (n.cores || 0), 0)}
+                  </div>
+                </div>
+
+                <div className="p-3 rounded-lg bg-clinical-bg/50 border border-clinical-border/60">
+                  <div className="text-[11px] text-clinical-muted flex items-center gap-1 mb-1">
+                    <Activity size={12} className="text-indigo-400" />
+                    Transport Mode
+                  </div>
+                  <div className="text-xs font-semibold text-clinical-text uppercase tracking-wider mt-1">
+                    HTTP Streaming
+                  </div>
+                </div>
+              </div>
+
+              {/* Registered Worker Nodes List */}
+              <div className="mb-5">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-xs font-bold text-clinical-text uppercase tracking-wider flex items-center gap-1.5">
+                    <Laptop size={13} className="text-cyan-400" />
+                    Compute Worker Workstations
+                  </h3>
+                  <span className="text-[11px] text-clinical-muted">
+                    {clusterNodes.length} registered
+                  </span>
+                </div>
+
+                {clusterNodes.length === 0 ? (
+                  <div className="p-6 text-center rounded-lg border border-dashed border-clinical-border bg-clinical-bg/30 text-clinical-muted text-xs">
+                    <Laptop size={28} className="mx-auto mb-2 opacity-40 text-cyan-400" />
+                    <p className="font-medium text-clinical-text mb-1">No worker workstations registered yet</p>
+                    <p className="text-[11px] max-w-md mx-auto">
+                      Add idle clinic workstations below by entering their IP address and port. Workstations should run the lightweight background worker daemon (<code className="font-mono text-cyan-400">cluster_worker/vpsqa_worker.py</code>).
+                    </p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto rounded-lg border border-clinical-border bg-clinical-bg/30">
+                    <table className="w-full text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-clinical-border/60 bg-clinical-surface/80 text-clinical-muted text-[11px]">
+                          <th className="py-2.5 px-3 font-semibold">Node Name &amp; Host</th>
+                          <th className="py-2.5 px-3 font-semibold">Endpoint URL</th>
+                          <th className="py-2.5 px-3 font-semibold">Live Status</th>
+                          <th className="py-2.5 px-3 font-semibold">Resources</th>
+                          <th className="py-2.5 px-3 font-semibold text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-clinical-border/40">
+                        {clusterNodes.map((node) => {
+                          const isOnline = node.is_online;
+                          const isIdle = node.is_idle;
+                          let statusBadge = (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                              <AlertCircle size={10} /> Offline
+                            </span>
+                          );
+
+                          if (!node.enabled) {
+                            statusBadge = (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-500/10 text-slate-400 border border-slate-500/20">
+                                Disabled
+                              </span>
+                            );
+                          } else if (isOnline && isIdle) {
+                            statusBadge = (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                                <CheckCircle2 size={10} /> Idle &amp; Ready
+                              </span>
+                            );
+                          } else if (isOnline && node.status === "busy") {
+                            statusBadge = (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                                <Activity size={10} className="animate-spin" /> Calculating
+                              </span>
+                            );
+                          } else if (isOnline && node.status === "user_active") {
+                            statusBadge = (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                <Laptop size={10} /> In Use (User Active)
+                              </span>
+                            );
+                          }
+
+                          return (
+                            <tr key={node.id} className="hover:bg-clinical-surface/50 transition-colors">
+                              <td className="py-2.5 px-3">
+                                <div className="font-semibold text-clinical-text flex items-center gap-1.5">
+                                  <Laptop size={13} className="text-cyan-400 shrink-0" />
+                                  <span>{node.name}</span>
+                                </div>
+                                {node.hostname && (
+                                  <div className="text-[10px] text-clinical-muted">
+                                    {node.hostname} {node.os ? `(${node.os})` : ""}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-[11px] text-clinical-text">
+                                {node.url}
+                              </td>
+                              <td className="py-2.5 px-3">
+                                {statusBadge}
+                              </td>
+                              <td className="py-2.5 px-3">
+                                {isOnline ? (
+                                  <div className="space-y-0.5 text-[11px]">
+                                    <div className="text-clinical-text font-medium flex items-center gap-1">
+                                      <Cpu size={11} className="text-clinical-accent" />
+                                      {node.cores} cores
+                                    </div>
+                                    <div className="text-[10px] text-clinical-muted">
+                                      CPU: {node.cpu_pct.toFixed(0)}%
+                                      {node.idle_seconds !== undefined && node.idle_seconds > 0 && (
+                                        <> • Idle {Math.round(node.idle_seconds / 60)}m</>
+                                      )}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <span className="text-[11px] text-clinical-muted">—</span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <div className="inline-flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleTestNode(node.id)}
+                                    disabled={testingNodeId === node.id}
+                                    title="Ping & Test Worker"
+                                    className="p-1.5 rounded hover:bg-clinical-border/50 text-cyan-400 hover:text-cyan-300 transition-colors disabled:opacity-50"
+                                  >
+                                    <Radio size={13} className={testingNodeId === node.id ? "animate-pulse" : ""} />
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleNode(node.id)}
+                                    disabled={togglingNodeId === node.id}
+                                    title={node.enabled ? "Disable node" : "Enable node"}
+                                    className={`px-2 py-1 text-[10px] font-semibold rounded border transition-colors ${
+                                      node.enabled
+                                        ? "bg-slate-700/50 hover:bg-slate-700 text-slate-300 border-slate-600/50"
+                                        : "bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border-emerald-500/30"
+                                    }`}
+                                  >
+                                    {node.enabled ? "Disable" : "Enable"}
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteNode(node.id, node.name)}
+                                    title="Remove Worker Node"
+                                    className="p-1.5 rounded hover:bg-rose-500/10 text-rose-400 hover:text-rose-300 transition-colors"
+                                  >
+                                    <Trash2 size={13} />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Add New Worker Node Form */}
+              <form onSubmit={handleAddNode} className="p-4 rounded-lg bg-clinical-bg/50 border border-clinical-border/60 mb-5">
+                <h4 className="text-xs font-bold text-clinical-text uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                  <Plus size={13} className="text-cyan-400" />
+                  Register New Worker Node
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
+                  <div className="sm:col-span-2">
+                    <label className="text-[11px] text-clinical-muted block mb-1">Workstation Name (Optional)</label>
+                    <input
+                      type="text"
+                      value={newNodeName}
+                      onChange={(e) => setNewNodeName(e.target.value)}
+                      placeholder="e.g. Planning-PC-3"
+                      className="w-full text-xs bg-clinical-bg border border-clinical-border rounded px-3 py-1.5 text-clinical-text focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="text-[11px] text-clinical-muted block mb-1">Worker Daemon URL</label>
+                    <input
+                      type="text"
+                      value={newNodeUrl}
+                      onChange={(e) => setNewNodeUrl(e.target.value)}
+                      placeholder="http://192.168.1.150:5055"
+                      className="w-full text-xs font-mono bg-clinical-bg border border-clinical-border rounded px-3 py-1.5 text-clinical-text focus:outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                  <div className="flex items-end">
+                    <button
+                      type="submit"
+                      disabled={addingNode || !newNodeUrl.trim()}
+                      className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded transition-colors disabled:opacity-50 cursor-pointer"
+                    >
+                      <Plus size={13} />
+                      Add Node
+                    </button>
+                  </div>
+                </div>
+                <p className="text-[10px] text-clinical-muted mt-2">
+                  Tip: Copy the <code className="text-cyan-400 font-mono">cluster_worker/</code> folder to any computer, run <code className="text-cyan-400 font-mono">run_worker.bat</code> (Windows) or <code className="text-cyan-400 font-mono">run_worker.sh</code> (Linux), then enter its IP address above.
+                </p>
+              </form>
+
+              {/* Cluster Execution & Idle Guard Tuning */}
+              <div className="pt-4 border-t border-clinical-border/50">
+                <h4 className="text-xs font-bold text-clinical-text uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                  <Sliders size={13} className="text-cyan-400" />
+                  Cluster Execution &amp; Idle Safeguards
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div>
+                    <label className="text-xs font-semibold text-clinical-text block mb-1">
+                      Beam Task Timeout (sec)
+                    </label>
+                    <input
+                      type="number"
+                      min={60}
+                      max={7200}
+                      value={clusterConfig.cluster_timeout_seconds}
+                      onChange={(e) => setClusterConfig((prev) => ({ ...prev, cluster_timeout_seconds: parseInt(e.target.value, 10) || 1800 }))}
+                      className="w-full text-xs font-mono bg-clinical-bg border border-clinical-border rounded px-3 py-1.5 text-clinical-text"
+                    />
+                    <span className="text-[10px] text-clinical-muted mt-0.5 block">Fallback to local compute if worker exceeds limit</span>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-clinical-text block mb-1">
+                      Required Idle Time (min)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min={0.5}
+                      max={60}
+                      value={clusterConfig.cluster_idle_minutes}
+                      onChange={(e) => setClusterConfig((prev) => ({ ...prev, cluster_idle_minutes: parseFloat(e.target.value) || 5.0 }))}
+                      className="w-full text-xs font-mono bg-clinical-bg border border-clinical-border rounded px-3 py-1.5 text-clinical-text"
+                    />
+                    <span className="text-[10px] text-clinical-muted mt-0.5 block">Minutes without mouse/keyboard input before taking jobs</span>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-clinical-text block mb-1">
+                      Max CPU Usage Limit (%)
+                    </label>
+                    <input
+                      type="number"
+                      step="1"
+                      min={5}
+                      max={95}
+                      value={clusterConfig.cluster_max_cpu_pct}
+                      onChange={(e) => setClusterConfig((prev) => ({ ...prev, cluster_max_cpu_pct: parseFloat(e.target.value) || 30.0 }))}
+                      className="w-full text-xs font-mono bg-clinical-bg border border-clinical-border rounded px-3 py-1.5 text-clinical-text"
+                    />
+                    <span className="text-[10px] text-clinical-muted mt-0.5 block">Skip worker if background user load exceeds this</span>
+                  </div>
                 </div>
               </div>
             </div>

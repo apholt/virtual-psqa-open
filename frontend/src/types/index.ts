@@ -268,6 +268,14 @@ export interface SettingsData {
     has_password?: boolean;
     orthanc_timeout_seconds?: number;
   };
+  cluster?: {
+    cluster_enabled: boolean;
+    cluster_timeout_seconds: number;
+    cluster_idle_minutes: number;
+    cluster_max_cpu_pct: number;
+    cluster_storage_mode?: string;
+    cluster_shared_path?: string | null;
+  };
 }
 
 export interface SpotStatsPayload {
