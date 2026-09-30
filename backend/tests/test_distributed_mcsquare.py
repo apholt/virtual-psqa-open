@@ -390,3 +390,28 @@ def test_worker_pull_workflow(tmp_path):
         with np.load(out_beam_path) as z:
             assert np.allclose(z["array"], 3.14)
 
+
+def test_worker_pull_unauthenticated_access():
+    """Verify that remote daemon can access worker endpoints without a browser login session."""
+    orig_auth = settings.AUTH_ENABLED
+    try:
+        settings.AUTH_ENABLED = True
+        unauthenticated_client = TestClient(main_app)
+        resp = unauthenticated_client.post(
+            "/api/cluster/worker/heartbeat",
+            json={
+                "node_id": "daemon-no-cookie",
+                "name": "Daemon No Cookie",
+                "cores": 4,
+                "cpu_pct": 2.0,
+                "idle_seconds": 600.0,
+                "is_idle": True,
+                "mode": "pull",
+            },
+        )
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+        assert resp.json()["status"] == "ok"
+    finally:
+        settings.AUTH_ENABLED = orig_auth
+
+

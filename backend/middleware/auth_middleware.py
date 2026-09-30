@@ -30,6 +30,7 @@ PUBLIC_PREFIXES = (
     "/api/auth/logout",
     "/api/auth/me",
     "/favicon.ico",
+    "/api/cluster/worker",
 )
 
 
