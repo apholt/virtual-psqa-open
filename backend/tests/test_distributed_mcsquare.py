@@ -415,3 +415,45 @@ def test_worker_pull_unauthenticated_access():
         settings.AUTH_ENABLED = orig_auth
 
 
+def test_idle_minutes_zero_dedicated_mode(monkeypatch):
+    """Verify that idle_minutes_threshold <= 0 allows running in dedicated mode immediately."""
+    from services.cluster.idle_detector import is_machine_idle
+
+    # User active 0 seconds ago, CPU 10%
+    monkeypatch.setattr("services.cluster.idle_detector.get_user_idle_seconds", lambda: 0.0)
+    monkeypatch.setattr("services.cluster.idle_detector.get_cpu_percent", lambda: 10.0)
+
+    # With normal threshold (e.g. 5 min), machine is NOT idle
+    idle, reason = is_machine_idle(idle_minutes_threshold=5.0, max_cpu_percent=30.0)
+    assert idle is False
+    assert "User active" in reason
+
+    # With 0 threshold (dedicated mode), machine IS idle immediately
+    idle_0, reason_0 = is_machine_idle(idle_minutes_threshold=0.0, max_cpu_percent=30.0)
+    assert idle_0 is True
+    assert "Ready" in reason_0
+
+
+def test_heartbeat_returns_cluster_idle_config():
+    """Verify that worker heartbeat returns idle_minutes and max_cpu_pct so workers sync dynamically."""
+    client = TestClient(main_app)
+    resp = client.post(
+        "/api/cluster/worker/heartbeat",
+        json={
+            "node_id": "test-sync-node",
+            "name": "Sync Node",
+            "cores": 8,
+            "cpu_pct": 5.0,
+            "idle_seconds": 120.0,
+            "is_idle": True,
+            "mode": "pull",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "idle_minutes" in data
+    assert "max_cpu_pct" in data
+    assert data["idle_minutes"] == getattr(settings, "CLUSTER_IDLE_MINUTES", 5.0)
+
+
+

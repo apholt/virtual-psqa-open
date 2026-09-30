@@ -93,14 +93,14 @@ def is_machine_idle(
     Returns (is_idle, reason).
     """
     idle_seconds = get_user_idle_seconds()
-    required_seconds = idle_minutes_threshold * 60.0
-
-    if idle_seconds < required_seconds:
-        remaining = int(required_seconds - idle_seconds)
-        return False, f"User active ({int(idle_seconds)}s idle, needs {remaining}s more)"
+    if idle_minutes_threshold > 0:
+        required_seconds = idle_minutes_threshold * 60.0
+        if idle_seconds < required_seconds:
+            remaining = int(required_seconds - idle_seconds)
+            return False, f"User active ({int(idle_seconds)}s idle, needs {remaining}s more)"
 
     cpu_pct = get_cpu_percent()
-    if cpu_pct > max_cpu_percent:
+    if max_cpu_percent > 0 and cpu_pct > max_cpu_percent:
         return False, f"CPU busy ({cpu_pct:.1f}% > {max_cpu_percent:.1f}% limit)"
 
-    return True, f"Idle ({int(idle_seconds)}s inactive, CPU {cpu_pct:.1f}%)"
+    return True, f"Ready ({int(idle_seconds)}s inactive, CPU {cpu_pct:.1f}%)"

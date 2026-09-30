@@ -25,11 +25,19 @@ if [ -z "$SERVER_URL" ]; then
     fi
 fi
 
+IDLE_PARAM=""
+if [ -f "idle_minutes.txt" ]; then
+    IDLE_MINUTES=$(cat idle_minutes.txt)
+    IDLE_PARAM="--idle-minutes ${IDLE_MINUTES}"
+elif [ -n "$3" ]; then
+    IDLE_PARAM="--idle-minutes $3"
+fi
+
 if [ -n "$SERVER_URL" ]; then
     echo "Starting worker in PULL (Outbound) Mode..."
     echo "Connecting to Server: ${SERVER_URL}"
-    python3 vpsqa_worker.py --server-url "${SERVER_URL}" --mcsquare-dir "${MCSQUARE_DIR}" --idle-minutes 5.0 --max-cpu-pct 30.0
+    python3 vpsqa_worker.py --server-url "${SERVER_URL}" --mcsquare-dir "${MCSQUARE_DIR}" ${IDLE_PARAM}
 else
     echo "Starting worker in PUSH Mode on port 8001..."
-    python3 vpsqa_worker.py --port 8001 --mcsquare-dir "${MCSQUARE_DIR}" --idle-minutes 5.0 --max-cpu-pct 30.0
+    python3 vpsqa_worker.py --port 8001 --mcsquare-dir "${MCSQUARE_DIR}" ${IDLE_PARAM:-"--idle-minutes 5.0"}
 fi

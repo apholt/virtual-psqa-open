@@ -1007,13 +1007,19 @@ export function Settings() {
                     <input
                       type="number"
                       step="0.5"
-                      min={0.5}
+                      min={0}
                       max={60}
                       value={clusterConfig.cluster_idle_minutes}
-                      onChange={(e) => setClusterConfig((prev) => ({ ...prev, cluster_idle_minutes: parseFloat(e.target.value) || 5.0 }))}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setClusterConfig((prev) => ({
+                          ...prev,
+                          cluster_idle_minutes: isNaN(val) ? 0.0 : Math.max(0, val),
+                        }));
+                      }}
                       className="w-full text-xs font-mono bg-clinical-bg border border-clinical-border rounded px-3 py-1.5 text-clinical-text"
                     />
-                    <span className="text-[10px] text-clinical-muted mt-0.5 block">Minutes without mouse/keyboard input before taking jobs</span>
+                    <span className="text-[10px] text-clinical-muted mt-0.5 block">Minutes without mouse/keyboard input before taking jobs (set to 0 for dedicated mode)</span>
                   </div>
 
                   <div>

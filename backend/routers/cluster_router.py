@@ -108,6 +108,8 @@ def worker_heartbeat(payload: WorkerHeartbeatRequest):
         "node_id": node.id,
         "enabled": node.enabled,
         "cluster_enabled": settings.CLUSTER_ENABLED,
+        "idle_minutes": getattr(settings, "CLUSTER_IDLE_MINUTES", 5.0),
+        "max_cpu_pct": getattr(settings, "CLUSTER_MAX_CPU_PCT", 30.0),
     }
 
 

@@ -45,6 +45,8 @@ _RUNNING_PROC: Optional[subprocess.Popen] = None
 _MCSQUARE_DIR: Path = Path("./MCsquare").resolve()
 _IDLE_MINUTES: float = 5.0
 _MAX_CPU_PCT: float = 30.0
+_IDLE_OVERRIDDEN_BY_CLI: bool = False
+_MAX_CPU_OVERRIDDEN_BY_CLI: bool = False
 
 
 class AbortCalculationException(Exception):
@@ -106,16 +108,17 @@ def get_cpu_percent() -> float:
 def is_machine_idle() -> tuple[bool, str]:
     """Checks whether this machine is unoccupied and ready to compute."""
     idle_sec = get_user_idle_seconds()
-    required_sec = _IDLE_MINUTES * 60.0
-
-    if idle_sec < required_sec:
-        return False, f"User active ({int(idle_sec)}s idle < {int(required_sec)}s required)"
+    if _IDLE_MINUTES > 0:
+        required_sec = _IDLE_MINUTES * 60.0
+        if idle_sec < required_sec:
+            return False, f"User active ({int(idle_sec)}s idle < {int(required_sec)}s required)"
 
     cpu_pct = get_cpu_percent()
-    if cpu_pct > _MAX_CPU_PCT:
+    if _MAX_CPU_PCT > 0 and cpu_pct > _MAX_CPU_PCT:
         return False, f"CPU busy ({cpu_pct:.1f}% > {_MAX_CPU_PCT:.1f}% limit)"
 
-    return True, f"Idle ({int(idle_sec)}s user inactivity, CPU {cpu_pct:.1f}%)"
+    status_str = f"Idle ({int(idle_sec)}s user inactivity, CPU {cpu_pct:.1f}%)" if _IDLE_MINUTES > 0 else f"Dedicated mode (always active, CPU {cpu_pct:.1f}%)"
+    return True, status_str
 
 
 def find_mcsquare_binary(install_dir: Path) -> Path:
@@ -226,19 +229,20 @@ Dose_To_Water = 0
         if ret is not None:
             break
 
-        # Check if user touched keyboard or mouse
-        idle_sec = get_user_idle_seconds()
-        if idle_sec < 4.0:
-            logger.warning(f"User activity detected on workstation ({idle_sec:.1f}s ago). Aborting MCsquare to yield CPU.")
-            try:
-                _RUNNING_PROC.terminate()
-                time.sleep(0.3)
-                if _RUNNING_PROC.poll() is None:
-                    _RUNNING_PROC.kill()
-            except Exception:
-                pass
-            _RUNNING_PROC = None
-            raise AbortCalculationException("User activity detected on worker PC")
+        # Check if user touched keyboard or mouse (only if idle requirement is active)
+        if _IDLE_MINUTES > 0:
+            idle_sec = get_user_idle_seconds()
+            if idle_sec < 4.0:
+                logger.warning(f"User activity detected on workstation ({idle_sec:.1f}s ago). Aborting MCsquare to yield CPU.")
+                try:
+                    _RUNNING_PROC.terminate()
+                    time.sleep(0.3)
+                    if _RUNNING_PROC.poll() is None:
+                        _RUNNING_PROC.kill()
+                except Exception:
+                    pass
+                _RUNNING_PROC = None
+                raise AbortCalculationException("User activity detected on worker PC")
 
         time.sleep(0.5)
 
@@ -320,6 +324,7 @@ def run_pull_worker(
     name: Optional[str] = None,
     poll_interval: float = 3.0,
 ):
+    global _IDLE_MINUTES, _MAX_CPU_PCT
     clean_server = server_url.rstrip("/")
     worker_name = name or socket.gethostname()
     logger.info("=================================================================")
@@ -329,7 +334,10 @@ def run_pull_worker(
     logger.info(f"Worker Node ID:   {node_id} ({worker_name})")
     logger.info(f"Host Machine:     {socket.gethostname()} ({platform.system()} {platform.release()})")
     logger.info(f"MCsquare Home:    {_MCSQUARE_DIR}")
-    logger.info(f"Idle Requirement: > {_IDLE_MINUTES} min user inactivity and < {_MAX_CPU_PCT}% background CPU")
+    if _IDLE_MINUTES <= 0:
+        logger.info(f"Idle Requirement: Dedicated mode (always active, 0 min idle requirement)")
+    else:
+        logger.info(f"Idle Requirement: > {_IDLE_MINUTES} min user inactivity and < {_MAX_CPU_PCT}% background CPU")
     logger.info("Outbound connection active. Zero incoming firewall rules required.")
     logger.info("=================================================================")
 
@@ -359,7 +367,19 @@ def run_pull_worker(
                 }
                 try:
                     with httpx.Client(timeout=5.0) as client:
-                        client.post(f"{clean_server}/api/cluster/worker/heartbeat", json=hb_payload)
+                        resp = client.post(f"{clean_server}/api/cluster/worker/heartbeat", json=hb_payload)
+                        if resp.status_code == 200:
+                            hb_data = resp.json()
+                            if not _IDLE_OVERRIDDEN_BY_CLI and "idle_minutes" in hb_data:
+                                s_idle = float(hb_data["idle_minutes"])
+                                if s_idle != _IDLE_MINUTES:
+                                    logger.info(f"Adopted server idle threshold: {s_idle} min")
+                                    _IDLE_MINUTES = s_idle
+                            if not _MAX_CPU_OVERRIDDEN_BY_CLI and "max_cpu_pct" in hb_data:
+                                s_cpu = float(hb_data["max_cpu_pct"])
+                                if s_cpu != _MAX_CPU_PCT:
+                                    logger.info(f"Adopted server max CPU limit: {s_cpu}%")
+                                    _MAX_CPU_PCT = s_cpu
                     last_heartbeat = now
                 except Exception as hb_err:
                     logger.warning(f"Could not reach server heartbeat at {clean_server}: {hb_err}")
@@ -533,7 +553,7 @@ async def simulate_beam(
 
 
 def main():
-    global _MCSQUARE_DIR, _IDLE_MINUTES, _MAX_CPU_PCT
+    global _MCSQUARE_DIR, _IDLE_MINUTES, _MAX_CPU_PCT, _IDLE_OVERRIDDEN_BY_CLI, _MAX_CPU_OVERRIDDEN_BY_CLI
 
     parser = argparse.ArgumentParser(description="VPSQA Standalone Distributed Worker")
     parser.add_argument("--server-url", default=None, help="Virtual PSQA Server URL (e.g. http://172.20.145.65:8000). Runs in outbound PULL mode.")
@@ -542,13 +562,17 @@ def main():
     parser.add_argument("--port", type=int, default=8001, help="Port to listen on in PUSH mode (default: 8001)")
     parser.add_argument("--host", default="0.0.0.0", help="Host IP to bind in PUSH mode (default: 0.0.0.0)")
     parser.add_argument("--mcsquare-dir", default="./MCsquare", help="Path to MCsquare directory containing BDL/ and executable")
-    parser.add_argument("--idle-minutes", type=float, default=5.0, help="Inactivity minutes before accepting tasks")
-    parser.add_argument("--max-cpu-pct", type=float, default=30.0, help="Max background CPU % before considered busy")
+    parser.add_argument("--idle-minutes", type=float, default=None, help="Inactivity minutes before accepting tasks (0 = dedicated mode)")
+    parser.add_argument("--max-cpu-pct", type=float, default=None, help="Max background CPU % before considered busy")
     args = parser.parse_args()
 
     _MCSQUARE_DIR = Path(args.mcsquare_dir).resolve()
-    _IDLE_MINUTES = args.idle_minutes
-    _MAX_CPU_PCT = args.max_cpu_pct
+    if args.idle_minutes is not None:
+        _IDLE_MINUTES = args.idle_minutes
+        _IDLE_OVERRIDDEN_BY_CLI = True
+    if args.max_cpu_pct is not None:
+        _MAX_CPU_PCT = args.max_cpu_pct
+        _MAX_CPU_OVERRIDDEN_BY_CLI = True
 
     node_id = args.node_id or socket.gethostname()
     name = args.name or socket.gethostname()

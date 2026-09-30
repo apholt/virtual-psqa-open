@@ -17,9 +17,20 @@ if %errorlevel% neq 0 (
     python -m pip install -r requirements.txt
 )
 
-REM Check for saved server URL
+REM Check for saved server URL or idle minutes
 if exist "server_url.txt" (
     set /p SERVER_URL=<server_url.txt
+)
+if exist "idle_minutes.txt" (
+    set /p IDLE_MINUTES=<idle_minutes.txt
+)
+if not "%~2"=="" (
+    set IDLE_MINUTES=%~2
+)
+
+set IDLE_PARAM=
+if not "%IDLE_MINUTES%"=="" (
+    set IDLE_PARAM=--idle-minutes %IDLE_MINUTES%
 )
 
 if "%SERVER_URL%"=="" (
@@ -39,17 +50,21 @@ if not "%SERVER_URL%"=="" (
     echo ========================================================
     echo Starting worker in PULL (Outbound) Mode
     echo Connecting to Server: %SERVER_URL%
+    if "%IDLE_MINUTES%"=="" (
+        echo * Idle Requirement: Dynamic (Synchronized with Server)
+    ) else (
+        echo * Idle Requirement: %IDLE_MINUTES% min (0 = Dedicated Compute Mode)
+    )
     echo * Outbound only: Bypasses hospital inbound firewalls
-    echo * Automatic user activity detection and CPU yielding
     echo ========================================================
     echo.
-    python vpsqa_worker.py --server-url "%SERVER_URL%" --mcsquare-dir "%MCSQUARE_DIR%" --idle-minutes 5.0 --max-cpu-pct 30.0
+    python vpsqa_worker.py --server-url "%SERVER_URL%" --mcsquare-dir "%MCSQUARE_DIR%" %IDLE_PARAM%
 ) else (
     echo ========================================================
     echo Starting worker in PUSH Mode on port 8001
     echo ========================================================
     echo.
-    python vpsqa_worker.py --port 8001 --mcsquare-dir "%MCSQUARE_DIR%" --idle-minutes 5.0 --max-cpu-pct 30.0
+    python vpsqa_worker.py --port 8001 --mcsquare-dir "%MCSQUARE_DIR%" %IDLE_PARAM%
 )
 
 pause
