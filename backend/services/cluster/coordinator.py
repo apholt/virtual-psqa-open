@@ -197,8 +197,23 @@ class ClusterCoordinator:
             from Process.MCsquare import MCsquare
             from Process.MCsquare_plan import export_plan_for_MCsquare
 
+            # Resolve MCsquare install dir
+            candidates = [
+                Path(settings.MCSQUARE_HOME).resolve(),
+                backend_dir.parent / "MCsquare",
+                backend_dir.parent / "mcSquare",
+            ]
+            install_dir = next((c for c in candidates if (c / "BDL").is_dir()), None)
+            if not install_dir:
+                install_dir = Path(settings.MCSQUARE_HOME).resolve()
+
             # 1. Initialize MCsquare helper
             mc2 = MCsquare()
+            mc2.Path_MCsquareLib = str(install_dir)
+            mc2.BDL.Path_MCsquareLib = str(install_dir)
+            mc2.BDL.BDL_folder = os.path.join(str(install_dir), "BDL")
+            if os.path.isdir(mc2.BDL.BDL_folder):
+                mc2.BDL.list = mc2.BDL.get_list_BDL()
             mc2.WorkDir = str(work_dir)
             mc2.init_simulation_directory()
 
@@ -210,17 +225,56 @@ class ClusterCoordinator:
             patient = patients.list[0]
             if not patient.Plans:
                 raise ValueError("No RT Ion Plan found in store")
-            patient.Plans = [patient.Plans[0]]
+
+            # Match plan if UID provided
+            chosen_plan = patient.Plans[0]
+            if plan.rtplan_uid:
+                import pydicom
+                for p in patient.Plans:
+                    try:
+                        p_file = getattr(p, "DcmFile", None)
+                        if p_file:
+                            ds = pydicom.dcmread(str(p_file), stop_before_pixels=True, force=True)
+                            if str(getattr(ds, "SOPInstanceUID", "")) == plan.rtplan_uid:
+                                chosen_plan = p
+                                break
+                    except Exception:
+                        pass
+
+            patient.Plans = [chosen_plan]
             patient.RTdoses = []
             patient.import_patient_data()
 
             CT = patient.CTimages[0]
             sim_plan = patient.Plans[0]
 
+            # Couch / density override if RTSTRUCT exists
+            rtstruct_path = None
+            for s in patient.RTstructs:
+                if getattr(s, "DcmFile", None):
+                    rtstruct_path = str(s.DcmFile)
+                    break
+            if rtstruct_path and install_dir:
+                hu_density_file = str(install_dir / "Scanners" / getattr(settings, "MCSQUARE_SCANNER", "default") / "HU_Density_Conversion.txt")
+                try:
+                    from ct_density_override import apply_density_overrides
+                    apply_density_overrides(CT, rtstruct_path, hu_density_file, log=logger.info)
+                except Exception as ov_err:
+                    logger.warning(f"Density override skipped in cluster prep: {ov_err}")
+
             # 3. Export CT geometry if not already generated
             if not ct_mhd_path.exists() or not ct_raw_path.exists():
                 logger.info(f"Generating CT.mhd / CT.raw in {work_dir}...")
                 mc2.export_CT_for_MCsquare(CT, str(ct_mhd_path), mc2.Crop_CT_contour)
+
+            # Resolve BDL
+            bdl_name = getattr(settings, "MCSQUARE_BDL_NAME", "auto")
+            if bdl_name == "auto":
+                machine = (sim_plan.TreatmentMachineName or "").upper()
+                is_fixed = any(tok in machine for tok in ("FB", "FIXED"))
+                bdl_name = getattr(settings, "MCSQUARE_BDL_FIXED", "FixedBeam") if is_fixed else getattr(settings, "MCSQUARE_BDL_GANTRY", "Gantry")
+            if bdl_name in mc2.BDL.list:
+                mc2.BDL.selected_BDL = bdl_name
 
             mc2.BDL.import_BDL()
         except Exception as prep_exc:
