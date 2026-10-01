@@ -20,6 +20,7 @@ import io
 import logging
 import os
 import platform
+import shutil
 import socket
 import subprocess
 import sys
@@ -154,6 +155,25 @@ def resolve_mcsquare_dir(candidate: Optional[Any] = None) -> Path:
     return Path(candidate or "./MCsquare").resolve()
 
 
+def _is_binary_compatible(bin_path: Path) -> bool:
+    """Tests if binary exists and passes host CPU instruction verification."""
+    if not bin_path.is_file() or not bin_path.exists():
+        return False
+    if platform.system().lower() != "windows":
+        try:
+            bin_path.chmod(bin_path.stat().st_mode | 0o755)
+        except Exception:
+            pass
+    try:
+        proc = subprocess.run([str(bin_path)], capture_output=True, text=True, timeout=1)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        if "Please verify that both the operating system and the processor" in out:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def find_mcsquare_binary(install_dir: Path) -> Path:
     """Finds a compatible MCsquare executable in the install directory or parent directories."""
     is_win = platform.system().lower() == "windows"
@@ -172,18 +192,24 @@ def find_mcsquare_binary(install_dir: Path) -> Path:
         Path("C:/virtual-psqa-open/MCsquare"),
     ])
 
+    # First pass: try candidates that pass the instruction compatibility check
+    for d in search_dirs:
+        if not d.is_dir():
+            continue
+        for c in candidates:
+            p = d / c
+            if p.is_file() and p.exists() and _is_binary_compatible(p):
+                return p.resolve()
+
+    # Second pass: fallback to any existing binary
     for d in search_dirs:
         if not d.is_dir():
             continue
         for c in candidates:
             p = d / c
             if p.is_file() and p.exists():
-                if not is_win:
-                    try:
-                        p.chmod(p.stat().st_mode | 0o755)
-                    except Exception:
-                        pass
                 return p.resolve()
+
     searched_str = ", ".join(str(d) for d in search_dirs)
     raise FileNotFoundError(f"No MCsquare executable found in {install_dir} (searched: {searched_str})")
 
@@ -204,16 +230,17 @@ def execute_mc2_simulation(
     exe = find_mcsquare_binary(_MCSQUARE_DIR)
     if exe.parent != _MCSQUARE_DIR and ((exe.parent / "BDL").is_dir() or (exe.parent / "Scanners").is_dir()):
         _MCSQUARE_DIR = exe.parent
+    mcsquare_home = _MCSQUARE_DIR
     scanner = meta.get("scanner", "default")
-    scanner_dir = _MCSQUARE_DIR / "Scanners" / scanner
+    scanner_dir = mcsquare_home / "Scanners" / scanner
     if not scanner_dir.exists():
-        scanner_dir = _MCSQUARE_DIR / "Scanners" / "default"
+        scanner_dir = mcsquare_home / "Scanners" / "default"
 
     bdl_name = meta.get("bdl_name", "auto")
-    bdl_dir = _MCSQUARE_DIR / "BDL"
+    bdl_dir = mcsquare_home / "BDL"
     bdl_file = bdl_dir / f"{bdl_name}.txt"
     if not bdl_file.exists():
-        bdl_candidates = list(bdl_dir.glob("*.txt"))
+        bdl_candidates = [f for f in bdl_dir.glob("*.txt") if "Sample" not in f.name] or list(bdl_dir.glob("*.txt"))
         if not bdl_candidates:
             raise FileNotFoundError(f"No BDL files found in {bdl_dir}")
         bdl_file = bdl_candidates[0]
@@ -223,6 +250,16 @@ def execute_mc2_simulation(
 
     (work_path / "Outputs").mkdir(parents=True, exist_ok=True)
     threads = max(1, (os.cpu_count() or 4) - 1)
+
+    # Copy calibration and BDL files directly into work_path
+    # This prevents any path separator, escape character, space, or path length issues on Windows and Linux
+    local_density = work_path / "HU_Density_Conversion.txt"
+    local_material = work_path / "HU_Material_Conversion.txt"
+    local_bdl = work_path / "BDL.txt"
+    shutil.copy2(scanner_dir / "HU_Density_Conversion.txt", local_density)
+    shutil.copy2(scanner_dir / "HU_Material_Conversion.txt", local_material)
+    shutil.copy2(bdl_file, local_bdl)
+
     config_content = f"""Num_Threads \t {threads}
 RNG_Seed \t 0
 Num_Primaries \t {primaries}
@@ -233,10 +270,9 @@ Epsilon_Max \t 0.25
 Te_Min \t 0.05
 
 CT_File \t CT.mhd
-ScannerDirectory \t {scanner_dir}
-HU_Density_Conversion_File \t {scanner_dir / 'HU_Density_Conversion.txt'}
-HU_Material_Conversion_File \t {scanner_dir / 'HU_Material_Conversion.txt'}
-BDL_Machine_Parameter_File \t {bdl_file}
+HU_Density_Conversion_File \t HU_Density_Conversion.txt
+HU_Material_Conversion_File \t HU_Material_Conversion.txt
+BDL_Machine_Parameter_File \t BDL.txt
 BDL_Plan_File \t PlanPencil.txt
 
 Simulate_Nuclear_Interactions \t True
@@ -247,12 +283,13 @@ Simulate_Secondary_Alphas \t True
 Output_Directory \t Outputs
 Dose_MHD_Output \t True
 Export_Beam_dose \t True
-Dose_To_Water \t False
+Dose_to_Water_conversion \t OnlineSPR
 """
     (work_path / "config.txt").write_text(config_content.strip() + "\n", encoding="utf-8")
 
     env = os.environ.copy()
-    env["MCsquare_Materials_Dir"] = str(_MCSQUARE_DIR / "Materials")
+    materials_dir = (mcsquare_home / "Materials").resolve()
+    env["MCsquare_Materials_Dir"] = str(materials_dir.as_posix()) if platform.system().lower() == "windows" else str(materials_dir)
 
     extra_kwargs = {}
     if platform.system().lower() == "windows":
@@ -322,7 +359,15 @@ Dose_To_Water \t False
     dim_size = [int(x) for x in headers.get("DimSize", "0 0 0").split()]
     voxel_size = [float(x) for x in headers.get("ElementSpacing", "1 1 1").split()]
     offset = [float(x) for x in headers.get("Offset", "0 0 0").split()]
-    raw_file = outputs_dir / headers.get("ElementDataFile", dose_mhd.stem + ".raw")
+    raw_name = headers.get("ElementDataFile", dose_mhd.stem + ".raw").strip()
+    raw_basename = Path(raw_name.replace("\\", "/")).name
+    raw_file = outputs_dir / raw_basename
+    if not raw_file.exists():
+        raw_file = work_path / raw_name
+    if not raw_file.exists():
+        raw_file = outputs_dir / f"{dose_mhd.stem}.raw"
+    if not raw_file.exists():
+        raise FileNotFoundError(f"Dose raw data file not found: {raw_file}")
 
     raw_bytes = raw_file.read_bytes()
     elem_type = headers.get("ElementType", "MET_FLOAT").strip().upper()
@@ -359,13 +404,21 @@ def execute_task_from_zip(
     meta: dict,
 ) -> tuple[bytes, float, list[int]]:
     """Unpacks task input zip into temporary directory and runs simulation."""
-    with tempfile.TemporaryDirectory(prefix="vpsqa_pull_") as tmpdir:
-        work_path = Path(tmpdir)
+    tmpdir = tempfile.mkdtemp(prefix="vpsqa_pull_")
+    work_path = Path(tmpdir)
+    try:
         with zipfile.ZipFile(io.BytesIO(zip_bytes), mode="r") as zf:
             zf.extractall(work_path)
 
         beam_label = f"Plan {meta.get('plan_id')} Beam {meta.get('beam_no')}"
         return execute_mc2_simulation(work_path, meta, beam_label=beam_label)
+    finally:
+        # Avoid Windows WinError 32 (file in use / antivirus lock during deletion)
+        time.sleep(0.3)
+        try:
+            shutil.rmtree(work_path, ignore_errors=True)
+        except Exception:
+            pass
 
 
 # ============================================================================
@@ -514,9 +567,22 @@ def run_pull_worker(
     hb_thread = threading.Thread(target=heartbeat_worker, daemon=True)
     hb_thread.start()
 
+    last_idle_state: Optional[bool] = None
+
     while True:
         try:
             idle_ok, idle_reason = is_machine_idle()
+
+            if idle_ok != last_idle_state:
+                last_idle_state = idle_ok
+                if idle_ok:
+                    logger.info(f"[ACTIVE/IDLE] {idle_reason}. Polling server for beam simulation tasks...")
+                else:
+                    logger.info(
+                        f"[STANDBY] {idle_reason}.\n"
+                        f"          Worker is yielding CPU to local user. Tasks will not be accepted until machine is idle.\n"
+                        f"          (Tip: To accept tasks immediately regardless of background activity, launch with: ./run_worker.sh 0)"
+                    )
 
             # Poll for beam tasks when idle and not busy
             if idle_ok and _CURRENT_TASK is None:
@@ -671,24 +737,29 @@ async def simulate_beam(
         "scanner": scanner,
     }
 
-    with tempfile.TemporaryDirectory(prefix="vpsqa_push_") as tmpdir:
-        work_path = Path(tmpdir)
+    tmpdir = tempfile.mkdtemp(prefix="vpsqa_push_")
+    work_path = Path(tmpdir)
+    try:
         (work_path / "CT.mhd").write_bytes(await ct_mhd.read())
         (work_path / "CT.raw").write_bytes(await ct_raw.read())
         (work_path / "PlanPencil.txt").write_bytes(await plan_pencil.read())
 
+        dose_bytes, max_dose, _ = execute_mc2_simulation(work_path, meta, beam_label=task_label)
+        return Response(
+            content=dose_bytes,
+            media_type="application/octet-stream",
+            headers={
+                "X-Beam-Number": str(beam_no),
+                "X-Max-Dose": str(max_dose),
+            },
+        )
+    finally:
+        _CURRENT_TASK = None
+        time.sleep(0.3)
         try:
-            dose_bytes, max_dose, _ = execute_mc2_simulation(work_path, meta, beam_label=task_label)
-            return Response(
-                content=dose_bytes,
-                media_type="application/octet-stream",
-                headers={
-                    "X-Beam-Number": str(beam_no),
-                    "X-Max-Dose": str(max_dose),
-                },
-            )
-        finally:
-            _CURRENT_TASK = None
+            shutil.rmtree(work_path, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def main():
@@ -704,6 +775,7 @@ def main():
     parser.add_argument("--idle-minutes", type=float, default=None, help="Inactivity minutes before accepting tasks (0 = dedicated mode)")
     parser.add_argument("--max-cpu-pct", type=float, default=None, help="Max background CPU percent before considered busy")
     args = parser.parse_args()
+
     _MCSQUARE_DIR = resolve_mcsquare_dir(args.mcsquare_dir)
     if args.idle_minutes is not None:
         _IDLE_MINUTES = args.idle_minutes

@@ -33,6 +33,8 @@ logs/
 *.log.*
 *.bak
 *.bak_*
+cluster_worker/server_url.txt
+cluster_worker/idle_minutes.txt
 
 # Python caches
 __pycache__/

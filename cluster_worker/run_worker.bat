@@ -1,19 +1,25 @@
 @echo off
+setlocal
+cd /d "%~dp0"
 title Virtual PSQA - Idle MCsquare Worker
 echo ========================================================
 echo   Virtual PSQA - Distributed Monte Carlo Worker
 echo ========================================================
 echo.
 
-set MCSQUARE_DIR=%~dp0..\MCsquare
-if not exist "%MCSQUARE_DIR%" set MCSQUARE_DIR=..\MCsquare
-if not exist "%MCSQUARE_DIR%" set MCSQUARE_DIR=%~dp0MCsquare
-if not exist "%MCSQUARE_DIR%" set MCSQUARE_DIR=.\MCsquare
+set "MCSQUARE_DIR=%~dp0..\MCsquare"
+if not exist "%MCSQUARE_DIR%" set "MCSQUARE_DIR=%~dp0MCsquare"
+if not exist "%MCSQUARE_DIR%" set "MCSQUARE_DIR=..\MCsquare"
+if not exist "%MCSQUARE_DIR%" set "MCSQUARE_DIR=.\MCsquare"
+
+set "PY=python"
+if exist "%~dp0.venv\Scripts\python.exe" set "PY=%~dp0.venv\Scripts\python.exe"
+if exist "%~dp0..\.venv\Scripts\python.exe" set "PY=%~dp0..\.venv\Scripts\python.exe"
 
 echo Checking dependencies...
-python -c "import httpx, numpy" 2>nul
+"%PY%" -c "import httpx, numpy, fastapi, uvicorn" 2>nul
 if %errorlevel% neq 0 echo Installing worker dependencies...
-if %errorlevel% neq 0 python -m pip install -r requirements.txt
+if %errorlevel% neq 0 "%PY%" -m pip install -r "%~dp0requirements.txt"
 
 REM Parse command line arguments:
 REM   run_worker.bat                        (uses saved settings or prompts)
@@ -112,7 +118,7 @@ if not "%IDLE_MINUTES%"=="" echo * Idle Requirement: %IDLE_MINUTES% min (0 = Ded
 echo * Outbound only: Bypasses hospital inbound firewalls
 echo ========================================================
 echo.
-python vpsqa_worker.py --server-url "%SERVER_URL%" --mcsquare-dir "%MCSQUARE_DIR%" %IDLE_PARAM% %NODE_PARAM%
+"%PY%" "%~dp0vpsqa_worker.py" --server-url "%SERVER_URL%" --mcsquare-dir "%MCSQUARE_DIR%" %IDLE_PARAM% %NODE_PARAM%
 goto end
 
 :push_mode
@@ -120,7 +126,7 @@ echo ========================================================
 echo Starting worker in PUSH Mode on port 8001
 echo ========================================================
 echo.
-python vpsqa_worker.py --port 8001 --mcsquare-dir "%MCSQUARE_DIR%" %IDLE_PARAM% %NODE_PARAM%
+"%PY%" "%~dp0vpsqa_worker.py" --port 8001 --mcsquare-dir "%MCSQUARE_DIR%" %IDLE_PARAM% %NODE_PARAM%
 
 :end
 pause

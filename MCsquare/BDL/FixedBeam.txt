@@ -18,6 +18,13 @@ RS_density = 1.19
 RS_WET = 40.0
 
 Range Shifter parameters
+RS_ID = RS60
+RS_type = binary
+RS_material = 64
+RS_density = 1.19
+RS_WET = 60.0
+
+Range Shifter parameters
 RS_ID = RS80
 RS_type = binary
 RS_material = 64
