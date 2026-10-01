@@ -328,6 +328,9 @@ def run_pull_worker(
 ):
     global _IDLE_MINUTES, _MAX_CPU_PCT
     clean_server = server_url.rstrip("/")
+    if not clean_server.startswith("http://") and not clean_server.startswith("https://"):
+        clean_server = f"http://{clean_server}"
+
     worker_name = name or socket.gethostname()
     logger.info("=================================================================")
     logger.info("  Virtual PSQA Distributed MCsquare Worker — PULL (Outbound) Mode")
@@ -340,8 +343,46 @@ def run_pull_worker(
         logger.info(f"Idle Requirement: Dedicated mode (always active, 0 min idle requirement)")
     else:
         logger.info(f"Idle Requirement: > {_IDLE_MINUTES} min user inactivity and < {_MAX_CPU_PCT}% background CPU")
-    logger.info("Outbound connection active. Zero incoming firewall rules required.")
     logger.info("=================================================================")
+
+    # Test initial connection synchronously so errors are immediately visible in the console
+    logger.info(f"Connecting to Virtual PSQA Server at {clean_server}...")
+    try:
+        init_idle, _ = is_machine_idle()
+        init_payload = {
+            "node_id": node_id,
+            "name": worker_name,
+            "hostname": socket.gethostname(),
+            "os": f"{platform.system()} {platform.release()}",
+            "cores": os.cpu_count() or 1,
+            "cpu_pct": round(get_cpu_percent(), 1),
+            "idle_seconds": round(get_user_idle_seconds(), 1),
+            "is_idle": init_idle,
+            "status": "idle" if init_idle else "user_active",
+            "mode": "pull",
+        }
+        with httpx.Client(timeout=8.0) as client:
+            resp = client.post(f"{clean_server}/api/cluster/worker/heartbeat", json=init_payload)
+            if resp.status_code == 200:
+                hb_data = resp.json()
+                logger.info(
+                    f">>> [CONNECTED] Successfully registered with Virtual PSQA Server!\n"
+                    f"    Node ID: {node_id} | Status: {init_payload['status']} | Presence confirmed."
+                )
+            else:
+                logger.error(
+                    f"[ERROR] Server responded with HTTP {resp.status_code}: {resp.text}\n"
+                    f"Check that the server URL ({clean_server}) is correct."
+                )
+    except Exception as exc:
+        logger.error(
+            f"[CONNECTION ERROR] Failed to reach Virtual PSQA Server at {clean_server}!\n"
+            f"Details: {exc}\n\n"
+            f"Please check:\n"
+            f" 1. Is the port included? (e.g. http://172.20.145.65:8000 instead of http://172.20.145.65)\n"
+            f" 2. Is the server running?\n"
+            f" 3. Does Windows Firewall on the server allow inbound connections on that port?"
+        )
 
     import threading
 
@@ -387,8 +428,10 @@ def run_pull_worker(
                             if s_cpu != _MAX_CPU_PCT:
                                 logger.info(f"Adopted server max CPU limit: {s_cpu}%")
                                 _MAX_CPU_PCT = s_cpu
+                    else:
+                        logger.error(f"[HEARTBEAT ERROR] Server returned HTTP {resp.status_code}: {resp.text}")
             except Exception as hb_err:
-                logger.debug(f"Heartbeat check failed: {hb_err}")
+                logger.warning(f"[HEARTBEAT ERROR] Lost connection to server at {clean_server}: {hb_err}")
             time.sleep(5.0)
 
     hb_thread = threading.Thread(target=heartbeat_worker, daemon=True)
@@ -470,7 +513,7 @@ def run_pull_worker(
                                 finally:
                                     _CURRENT_TASK = None
                 except Exception as poll_err:
-                    logger.debug(f"Poll check failed: {poll_err}")
+                    logger.warning(f"Task poll failed: {poll_err}")
 
             time.sleep(poll_interval)
 

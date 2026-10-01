@@ -64,7 +64,7 @@ class NodeRegistry:
             logger.warning(f"Failed to persist cluster nodes: {exc}")
 
     def list_nodes(self) -> list[ClusterNode]:
-        return list(self._nodes.values())
+        return list({n.id: n for n in self._nodes.values()}.values())
 
     def get_node(self, node_id: str) -> Optional[ClusterNode]:
         return self._nodes.get(node_id)
@@ -151,6 +151,10 @@ class NodeRegistry:
             self._nodes[req.node_id] = node
 
         self._save_nodes()
+        logger.info(
+            f"Heartbeat received: '{node.name}' (id={node.id}, online={node.is_online}, "
+            f"idle={node.is_idle}, status={node.status}, cpu={node.cpu_pct}%)"
+        )
         return node
 
     def remove_node(self, node_id: str) -> bool:

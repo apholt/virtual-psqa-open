@@ -25,15 +25,21 @@ set ARG1=%~1
 set ARG2=%~2
 set ARG3=%~3
 
-REM Detect if ARG1 is a server URL
+REM Detect if ARG1 is a server URL (contains :// or starts with digits for an IP)
 echo %ARG1% | findstr /i "://" >nul 2>&1
 if %errorlevel% equ 0 goto parse_url
+
+echo %ARG1% | findstr /r "^[0-9][0-9]*\.[0-9]" >nul 2>&1
+if %errorlevel% equ 0 goto parse_ip_url
 
 REM ARG1 is not a URL; if provided, it is IDLE_MINUTES
 if not "%ARG1%"=="" set IDLE_MINUTES=%ARG1%
 if not "%ARG1%"=="" echo %ARG1%> idle_minutes.txt
 if not "%ARG2%"=="" set NODE_ID=%ARG2%
 goto load_saved
+
+:parse_ip_url
+set ARG1=http://%ARG1%
 
 :parse_url
 set SERVER_URL=%ARG1%
@@ -53,8 +59,13 @@ echo Enter the Virtual PSQA Server address you use in your browser.
 echo (e.g. http://172.20.145.65:8000 or http://172.20.145.65:8080)
 echo.
 set /p USER_INPUT="Server URL [press Enter to skip for push mode]: "
-if not "%USER_INPUT%"=="" set SERVER_URL=%USER_INPUT%
-if not "%USER_INPUT%"=="" echo %USER_INPUT%> server_url.txt
+if "%USER_INPUT%"=="" goto launch
+
+echo %USER_INPUT% | findstr /i "://" >nul 2>&1
+if %errorlevel% neq 0 set USER_INPUT=http://%USER_INPUT%
+
+set SERVER_URL=%USER_INPUT%
+echo %USER_INPUT%> server_url.txt
 
 :launch
 set IDLE_PARAM=
