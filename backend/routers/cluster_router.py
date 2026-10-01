@@ -125,6 +125,11 @@ def worker_heartbeat(payload: WorkerHeartbeatRequest):
     """Outbound pull worker presence check-in."""
     registry = get_node_registry()
     node = registry.record_heartbeat(payload)
+
+    pool = get_task_pool()
+    active_tid = payload.active_task_id or payload.task_id
+    abort_task_id = active_tid if (active_tid and pool.should_abort_worker_task(payload.node_id, active_tid)) else None
+
     return {
         "status": "ok",
         "node_id": node.id,
@@ -132,6 +137,7 @@ def worker_heartbeat(payload: WorkerHeartbeatRequest):
         "cluster_enabled": settings.CLUSTER_ENABLED,
         "idle_minutes": getattr(settings, "CLUSTER_IDLE_MINUTES", 5.0),
         "max_cpu_pct": getattr(settings, "CLUSTER_MAX_CPU_PCT", 30.0),
+        "abort_task_id": abort_task_id,
     }
 
 

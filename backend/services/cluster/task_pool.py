@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from config import settings
 from services.cluster.models import BeamTaskRequest
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ class ClusterTaskPool:
     def __init__(self):
         self._lock = threading.Lock()
         self._tasks: dict[str, QueuedTask] = {}
+        self._aborted_tasks: dict[str, float] = {}
 
     def enqueue_task(
         self,
@@ -107,13 +109,16 @@ class ClusterTaskPool:
 
         now = time.time()
         with self._lock:
-            # 1. Clean up expired leases (> 30 minutes without submission or progress)
-            for t in self._tasks.values():
-                if t.status == "leased" and t.lease_time and (now - t.lease_time > 1800.0):
-                    logger.warning(f"Task {t.task_id} lease expired. Requeuing as pending.")
-                    t.status = "pending"
-                    t.leased_by = None
-                    t.lease_time = None
+            # 1. Clean up expired leases (> timeout without submission or progress)
+            timeout = float(getattr(settings, "CLUSTER_TIMEOUT_SECONDS", 3600.0))
+            for t in list(self._tasks.values()):
+                if t.status == "leased" and t.lease_time and (now - t.lease_time > timeout):
+                    logger.warning(f"Task {t.task_id[:8]} lease expired ({now - t.lease_time:.1f}s). Cancelling.")
+                    t.status = "aborted"
+                    t.error = f"lease_expired_after_{int(timeout)}s"
+                    t.done_event.set()
+                    self._aborted_tasks[t.task_id] = now
+                    del self._tasks[t.task_id]
 
             # 2. Priority task selection
             candidate: Optional[QueuedTask] = None
@@ -239,9 +244,52 @@ class ClusterTaskPool:
                 task.error = error
                 task.done_event.set()
 
+    def cancel_task(self, task_id: str, reason: str = "cancelled") -> None:
+        """
+        Explicitly cancels an active or queued task, waking up coordinator if waiting,
+        and registering task_id in _aborted_tasks so pull worker heartbeats receive abort signals.
+        """
+        with self._lock:
+            task = self._tasks.pop(task_id, None)
+            now = time.time()
+            if task:
+                task.status = "aborted"
+                task.error = reason
+                task.done_event.set()
+                logger.info(f"Task {task_id[:8]} cancelled: {reason}")
+            self._aborted_tasks[task_id] = now
+            # Clean up aborted tasks older than 30 minutes
+            cutoff = now - 1800.0
+            self._aborted_tasks = {k: v for k, v in self._aborted_tasks.items() if v > cutoff}
+
+    def should_abort_worker_task(self, node_id: str, active_task_id: Optional[str]) -> bool:
+        """
+        Determines if a task being actively computed by a worker should be aborted immediately.
+        Returns True if the task was explicitly aborted/timed out, removed from pool,
+        or no longer leased to this node.
+        """
+        if not active_task_id:
+            return False
+        with self._lock:
+            if active_task_id in self._aborted_tasks:
+                return True
+            task = self._tasks.get(active_task_id)
+            if not task:
+                # Task does not exist in pool (e.g. coordinator timed out or finished via local fallback)
+                return True
+            if task.status in ("aborted", "failed"):
+                return True
+            # If task was requeued or leased to another worker
+            if task.status == "pending":
+                return True
+            if task.status == "leased" and task.leased_by and not _matches_worker(task, node_id):
+                return True
+        return False
+
     def remove_task(self, task_id: str) -> None:
         with self._lock:
             self._tasks.pop(task_id, None)
+            self._aborted_tasks[task_id] = time.time()
 
 
 _TASK_POOL_INSTANCE: Optional[ClusterTaskPool] = None

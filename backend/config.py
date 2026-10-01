@@ -162,7 +162,7 @@ class Settings(BaseSettings):
     # Distributed MCsquare cluster computing
     CLUSTER_ENABLED: bool = False
     CLUSTER_NODES: list[str] = []
-    CLUSTER_TIMEOUT_SECONDS: int = 1800
+    CLUSTER_TIMEOUT_SECONDS: int = 3600
     CLUSTER_STORAGE_MODE: str = "http"  # 'http' or 'shared_folder'
     CLUSTER_SHARED_PATH: Optional[str] = None
     CLUSTER_IDLE_MINUTES: float = 5.0

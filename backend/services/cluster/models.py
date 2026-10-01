@@ -40,6 +40,9 @@ class WorkerHeartbeatRequest(BaseModel):
     is_idle: bool = True
     status: str = "idle"
     mode: str = "pull"
+    active_task: Optional[str] = None
+    active_task_id: Optional[str] = None
+    task_id: Optional[str] = None
 
 
 class WorkerPollRequest(BaseModel):

@@ -51,7 +51,16 @@ _MAX_CPU_OVERRIDDEN_BY_CLI: bool = False
 
 
 class AbortCalculationException(Exception):
+    """Raised when local user activity is detected and worker yields CPU."""
     pass
+
+
+class ServerAbortException(Exception):
+    """Raised when the server aborts or cancels the running task (timeout or cancelled)."""
+    pass
+
+
+_SERVER_ABORT_EVENT = threading.Event()
 
 
 def get_user_idle_seconds() -> float:
@@ -308,11 +317,25 @@ Dose_to_Water_conversion \t OnlineSPR
         **extra_kwargs,
     )
 
-    # Monitor loop: check process output AND check for user activity
+    # Monitor loop: check process output AND check for user activity / server abort
     while True:
         ret = _RUNNING_PROC.poll()
         if ret is not None:
             break
+
+        # Check if server requested abort (via heartbeat or /abort endpoint)
+        if _SERVER_ABORT_EVENT.is_set():
+            logger.warning(f"Server abort signal received for {beam_label}. Terminating MCsquare...")
+            try:
+                _RUNNING_PROC.terminate()
+                time.sleep(0.3)
+                if _RUNNING_PROC.poll() is None:
+                    _RUNNING_PROC.kill()
+            except Exception:
+                pass
+            _RUNNING_PROC = None
+            _SERVER_ABORT_EVENT.clear()
+            raise ServerAbortException(f"Calculation for {beam_label} was aborted by server command.")
 
         # Check if user touched keyboard or mouse (only if idle requirement is active)
         if _IDLE_MINUTES > 0:
@@ -531,6 +554,7 @@ def run_pull_worker(
                     status = "idle" if idle_ok else "user_active"
                     is_idle_val = idle_ok
 
+                active_tid = _CURRENT_TASK.get("task_id") if _CURRENT_TASK else None
                 hb_payload = {
                     "node_id": node_id,
                     "name": worker_name,
@@ -543,11 +567,28 @@ def run_pull_worker(
                     "status": status,
                     "mode": "pull",
                     "active_task": _CURRENT_TASK.get("task_label") if _CURRENT_TASK else None,
+                    "active_task_id": active_tid,
+                    "task_id": active_tid,
                 }
                 with httpx.Client(timeout=5.0, verify=False) as client:
                     resp = client.post(f"{clean_server}/api/cluster/worker/heartbeat", json=hb_payload)
                     if resp.status_code == 200:
                         hb_data = resp.json()
+                        abort_id = hb_data.get("abort_task_id")
+                        if abort_id and _CURRENT_TASK and _CURRENT_TASK.get("task_id") == abort_id:
+                            logger.warning(
+                                f">>> [SERVER KILL SIGNAL] Server commanded abort for task {abort_id[:8]} "
+                                f"({_CURRENT_TASK.get('task_label')})! Terminating simulation immediately..."
+                            )
+                            _SERVER_ABORT_EVENT.set()
+                            if _RUNNING_PROC is not None:
+                                try:
+                                    _RUNNING_PROC.terminate()
+                                    time.sleep(0.3)
+                                    if _RUNNING_PROC.poll() is None:
+                                        _RUNNING_PROC.kill()
+                                except Exception:
+                                    pass
                         if not _IDLE_OVERRIDDEN_BY_CLI and "idle_minutes" in hb_data:
                             s_idle = float(hb_data["idle_minutes"])
                             if s_idle != _IDLE_MINUTES:
@@ -639,6 +680,11 @@ def run_pull_worker(
                                         else:
                                             logger.error(f"Failed to upload dose result: {up_resp.text}")
 
+                                    except ServerAbortException as srv_err:
+                                        logger.warning(
+                                            f">>> [TASK CANCELLED BY SERVER] Task {task_id[:8]} was aborted by server: {srv_err}. "
+                                            f"Discarding calculation and returning to idle."
+                                        )
                                     except AbortCalculationException:
                                         logger.warning(f"[ABORTED] User active on workstation. Aborted task {task_id[:8]}.")
                                         client.post(
@@ -655,6 +701,7 @@ def run_pull_worker(
                                         )
                                 finally:
                                     _CURRENT_TASK = None
+                                    _SERVER_ABORT_EVENT.clear()
                 except Exception as poll_err:
                     logger.warning(f"Task poll failed: {poll_err}")
 
@@ -722,7 +769,8 @@ async def simulate_beam(
         raise HTTPException(status_code=409, detail="Node is currently busy with another task.")
 
     task_label = f"Plan {plan_id} Beam {beam_no} (Job {job_id})"
-    _CURRENT_TASK = {"task_label": task_label, "start_time": time.time()}
+    push_task_id = f"push_{job_id}_{beam_no}"
+    _CURRENT_TASK = {"task_label": task_label, "task_id": push_task_id, "start_time": time.time()}
 
     meta = {
         "job_id": job_id,
@@ -755,11 +803,29 @@ async def simulate_beam(
         )
     finally:
         _CURRENT_TASK = None
+        _SERVER_ABORT_EVENT.clear()
         time.sleep(0.3)
         try:
             shutil.rmtree(work_path, ignore_errors=True)
         except Exception:
             pass
+
+
+@app.post("/abort")
+def abort_push_simulation():
+    """Server-directed kill endpoint for push-mode workers."""
+    global _RUNNING_PROC, _SERVER_ABORT_EVENT
+    logger.warning(">>> [SERVER KILL SIGNAL] Received push /abort command. Terminating simulation...")
+    _SERVER_ABORT_EVENT.set()
+    if _RUNNING_PROC is not None:
+        try:
+            _RUNNING_PROC.terminate()
+            time.sleep(0.3)
+            if _RUNNING_PROC.poll() is None:
+                _RUNNING_PROC.kill()
+        except Exception:
+            pass
+    return {"status": "aborted"}
 
 
 def main():

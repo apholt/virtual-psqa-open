@@ -45,12 +45,15 @@ class ClusterCoordinator:
         ct_raw_bytes: bytes,
         output_beam_path: Path,
         progress_callback: Optional[Callable[[float], None]] = None,
-        timeout_seconds: float = 1800.0,
+        timeout_seconds: Optional[float] = None,
     ) -> BeamTaskResult:
         """
         Sends CT geometry and beam parameters to a remote worker node,
         monitors simulation execution, and downloads the resulting dose grid.
         """
+        if timeout_seconds is None:
+            timeout_seconds = float(getattr(settings, "CLUSTER_TIMEOUT_SECONDS", 3600.0))
+
         logger.info(
             f"Dispatching Beam {req.beam_no} of Plan {req.plan_id} to node '{node.name}' (mode={node.mode}, {node.url})..."
         )
@@ -71,11 +74,14 @@ class ClusterCoordinator:
             )
             logger.info(
                 f"Enqueued Beam {req.beam_no} to task pool for pull worker '{node.name}'. "
-                f"Waiting for completion (timeout={timeout_seconds}s)..."
+                f"Waiting for completion (timeout={timeout_seconds:.0f}s)..."
             )
             finished = task.done_event.wait(timeout=timeout_seconds)
             if not finished or task.status != "completed" or not task.result_bytes:
-                pool.remove_task(task.task_id)
+                pool.cancel_task(
+                    task.task_id,
+                    reason=f"Pull worker '{node.name}' timed out after {timeout_seconds:.0f}s or failed (status={task.status})"
+                )
                 raise RuntimeError(
                     task.error or f"Pull worker '{node.name}' failed to complete task within timeout."
                 )
@@ -119,15 +125,26 @@ class ClusterCoordinator:
             "scanner": str(req.scanner),
         }
 
-        with httpx.Client(timeout=timeout_seconds, verify=False) as client:
-            resp = client.post(f"{node.url}/simulate_beam", data=data, files=files)
-            if resp.status_code != 200:
-                raise RuntimeError(
-                    f"Remote node '{node.name}' returned status {resp.status_code}: {resp.text}"
-                )
+        try:
+            with httpx.Client(timeout=timeout_seconds, verify=False) as client:
+                resp = client.post(f"{node.url}/simulate_beam", data=data, files=files)
+                if resp.status_code != 200:
+                    raise RuntimeError(
+                        f"Remote node '{node.name}' returned status {resp.status_code}: {resp.text}"
+                    )
 
-            # The response payload is the compressed .npz dose grid
-            dose_bytes = resp.content
+                # The response payload is the compressed .npz dose grid
+                dose_bytes = resp.content
+        except Exception as push_err:
+            logger.warning(
+                f"Push node '{node.name}' request failed or timed out: {push_err}. Sending /abort signal..."
+            )
+            try:
+                with httpx.Client(timeout=5.0, verify=False) as abort_client:
+                    abort_client.post(f"{node.url}/abort")
+            except Exception:
+                pass
+            raise
             output_beam_path.parent.mkdir(parents=True, exist_ok=True)
             output_beam_path.write_bytes(dose_bytes)
 
@@ -364,6 +381,7 @@ class ClusterCoordinator:
         failed_tasks: list[tuple[BeamTaskRequest, Path]] = []
         completed_count = 0
 
+        cluster_timeout = float(getattr(settings, "CLUSTER_TIMEOUT_SECONDS", 3600.0))
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(assignments)) as executor:
             future_to_beam = {
                 executor.submit(
@@ -373,6 +391,7 @@ class ClusterCoordinator:
                     ct_mhd_bytes,
                     ct_raw_bytes,
                     out_path,
+                    timeout_seconds=cluster_timeout,
                 ): (node, req, out_path)
                 for node, req, out_path in assignments
             }
