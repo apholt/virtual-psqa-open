@@ -99,9 +99,29 @@ class NodeRegistry:
         now_str = datetime.now(timezone.utc).isoformat()
         node = self._nodes.get(req.node_id)
         if not node:
-            # Check by hostname or auto-register
+            # Check by hostname, name, or URL matching
+            req_host = (req.hostname or "").lower()
+            req_host_short = req_host.split(".")[0] if req_host else ""
+            req_node_id = req.node_id.lower()
+            req_node_short = req_node_id.split(".")[0]
+            req_name = (req.name or "").lower()
+
             for existing in self._nodes.values():
-                if existing.hostname and req.hostname and existing.hostname.lower() == req.hostname.lower():
+                # 1. Match existing hostname
+                if existing.hostname:
+                    e_host = existing.hostname.lower()
+                    if e_host in (req_host, req_host_short) or e_host.split(".")[0] in (req_host, req_host_short):
+                        node = existing
+                        break
+                # 2. Match existing name or ID
+                e_name = existing.name.lower()
+                e_id = existing.id.lower()
+                if e_id in (req_node_id, req_node_short) or e_name in (req_name, req_host_short, req_node_short):
+                    node = existing
+                    break
+                # 3. Match URL if it contains the worker's hostname or node ID
+                e_url = existing.url.lower()
+                if (req_host_short and req_host_short in e_url) or (req_node_short and req_node_short in e_url):
                     node = existing
                     break
 
@@ -126,6 +146,10 @@ class NodeRegistry:
         node.hostname = req.hostname or node.hostname
         node.os = req.os or node.os
         node.last_seen = now_str
+        # Index under req.node_id as well if it was registered under another ID
+        if node.id != req.node_id and req.node_id not in self._nodes:
+            self._nodes[req.node_id] = node
+
         self._save_nodes()
         return node
 
@@ -152,9 +176,10 @@ class NodeRegistry:
             if node.last_seen:
                 try:
                     last_dt = datetime.fromisoformat(node.last_seen.replace("Z", "+00:00"))
-                    if (now - last_dt).total_seconds() < 25.0:
+                    # Allow 45s heartbeat window to tolerate minor network jitter
+                    if (now - last_dt).total_seconds() < 45.0:
                         node.is_online = True
-                        node.is_idle = (node.status == "idle")
+                        node.is_idle = (node.status == "idle" and node.is_idle)
                         return node
                 except Exception:
                     pass
@@ -195,7 +220,20 @@ class NodeRegistry:
     def get_available_idle_nodes(self) -> list[ClusterNode]:
         """Returns enabled, online nodes that are currently idle and ready for tasks."""
         self.refresh_all()
-        return [n for n in self._nodes.values() if n.enabled and n.is_online and n.is_idle]
+        # Deduplicate in case an existing node was aliased under both node-1 and hostname
+        unique_nodes = {n.id: n for n in self._nodes.values()}
+        idle_nodes = [n for n in unique_nodes.values() if n.enabled and n.is_online and n.is_idle]
+
+        # Log node status breakdown for full operational transparency
+        node_states = ", ".join(
+            f"{n.name} (id={n.id}, mode={n.mode}, online={n.is_online}, idle={n.is_idle}, status={n.status})"
+            for n in unique_nodes.values()
+        )
+        logger.info(
+            f"Cluster status: {len(idle_nodes)}/{len(unique_nodes)} node(s) idle and ready for compute. "
+            f"[{node_states}]"
+        )
+        return idle_nodes
 
     def get_cluster_status(self) -> ClusterStatus:
         nodes = self.list_nodes()

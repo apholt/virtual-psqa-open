@@ -66,6 +66,8 @@ class ClusterCoordinator:
                 ct_raw_bytes=ct_raw_bytes,
                 output_beam_path=output_beam_path,
                 target_node_id=node.id,
+                target_node_name=node.name,
+                target_node_hostname=node.hostname,
             )
             logger.info(
                 f"Enqueued Beam {req.beam_no} to task pool for pull worker '{node.name}'. "
@@ -349,6 +351,13 @@ class ClusterCoordinator:
             f"Assigned {len(tasks)} beam(s) across {min(len(tasks), len(sorted_nodes))} node(s): "
             + ", ".join(f"Beam {r.beam_no} -> {n.name}" for n, r, _ in assignments)
         )
+        if len(sorted_nodes) == 1 and len(tasks) > 1:
+            logger.info(
+                f"Note: Only 1 idle node ('{sorted_nodes[0].name}') was available at dispatch time. "
+                f"All {len(tasks)} beams will be calculated sequentially on this node. "
+                f"To distribute beams simultaneously across multiple computers, ensure workers on other workstations "
+                f"are connected and idle (or running in dedicated mode via 'run_worker.bat 0')."
+            )
 
         # Execute concurrently with automatic fallback
         failed_tasks: list[tuple[BeamTaskRequest, Path]] = []

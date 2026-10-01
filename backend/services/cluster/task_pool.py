@@ -28,6 +28,8 @@ class QueuedTask:
     ct_raw_bytes: bytes
     output_beam_path: Path
     target_node_id: Optional[str] = None
+    target_node_name: Optional[str] = None
+    target_node_hostname: Optional[str] = None
     status: str = "pending"  # "pending", "leased", "completed", "failed", "aborted"
     leased_by: Optional[str] = None
     lease_time: Optional[float] = None
@@ -38,6 +40,25 @@ class QueuedTask:
     duration_seconds: float = 0.0
     error: Optional[str] = None
     done_event: threading.Event = field(default_factory=threading.Event)
+
+
+def _matches_worker(t: QueuedTask, node_id: str) -> bool:
+    """Checks whether a queued task targets the polling worker by ID, name, or hostname."""
+    if not node_id:
+        return False
+    w_clean = node_id.strip().lower()
+    w_short = w_clean.split(".")[0]
+
+    for target in (t.target_node_id, t.target_node_name, t.target_node_hostname):
+        if not target:
+            continue
+        t_clean = target.strip().lower()
+        t_short = t_clean.split(".")[0]
+        if w_clean == t_clean or w_short == t_short:
+            return True
+        if w_clean in t_clean or t_clean in w_clean:
+            return True
+    return False
 
 
 class ClusterTaskPool:
@@ -52,6 +73,8 @@ class ClusterTaskPool:
         ct_raw_bytes: bytes,
         output_beam_path: Path,
         target_node_id: Optional[str] = None,
+        target_node_name: Optional[str] = None,
+        target_node_hostname: Optional[str] = None,
     ) -> QueuedTask:
         """Enqueues a new beam simulation task for a pull worker."""
         task_id = str(uuid.uuid4())
@@ -62,12 +85,15 @@ class ClusterTaskPool:
             ct_raw_bytes=ct_raw_bytes,
             output_beam_path=output_beam_path,
             target_node_id=target_node_id,
+            target_node_name=target_node_name,
+            target_node_hostname=target_node_hostname,
         )
         with self._lock:
             self._tasks[task_id] = task
+        target_label = target_node_name or target_node_id or "any"
         logger.info(
-            f"Enqueued pull task {task_id}: Plan {req.plan_id} Beam {req.beam_no} "
-            f"(target: {target_node_id or 'any'})"
+            f"Enqueued pull task {task_id[:8]}: Plan {req.plan_id} Beam {req.beam_no} "
+            f"(target: {target_label})"
         )
         return task
 
@@ -89,19 +115,35 @@ class ClusterTaskPool:
                     t.leased_by = None
                     t.lease_time = None
 
-            # 2. Find eligible pending task
-            # Priority: tasks explicitly targeting this node first, then any pending task
+            # 2. Priority task selection
             candidate: Optional[QueuedTask] = None
+
+            # 2a. Tasks explicitly targeting this worker (by ID, name, or hostname)
             for t in self._tasks.values():
-                if t.status == "pending":
-                    if t.target_node_id and (
-                        t.target_node_id.lower() == node_id.lower()
-                        or t.target_node_id.split(".")[0].lower() == node_id.split(".")[0].lower()
-                    ):
+                if t.status == "pending" and _matches_worker(t, node_id):
+                    candidate = t
+                    break
+
+            # 2b. Tasks with no target (unassigned pool tasks)
+            if candidate is None:
+                for t in self._tasks.values():
+                    if t.status == "pending" and not (t.target_node_id or t.target_node_name or t.target_node_hostname):
                         candidate = t
                         break
-                    elif candidate is None:
+
+            # 2c. Work stealing: If a task has been targeted to another worker, but that worker
+            # has not claimed it after 20 seconds, allow any idle worker to steal it
+            # to prevent plan simulations from hanging.
+            if candidate is None:
+                for t in self._tasks.values():
+                    if t.status == "pending" and (now - t.created_at > 20.0):
+                        target_info = t.target_node_name or t.target_node_id or "unassigned"
+                        logger.info(
+                            f"Work-stealing task {t.task_id[:8]} (Plan {t.req.plan_id} Beam {t.req.beam_no}) "
+                            f"for worker '{node_id}' (target '{target_info}' pending for {now - t.created_at:.1f}s)"
+                        )
                         candidate = t
+                        break
 
             if candidate is None:
                 return None

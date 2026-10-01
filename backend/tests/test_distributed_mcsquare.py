@@ -486,5 +486,94 @@ def test_task_pool_resilient_hostname_matching():
     assert polled["task_id"] == task.task_id
 
 
+def test_multi_node_task_pool_distribution():
+    """Verify that multiple tasks targeted to different nodes are strictly distributed without early stealing."""
+    from services.cluster.task_pool import ClusterTaskPool
+    from services.cluster.models import BeamTaskRequest
+
+    pool = ClusterTaskPool()
+    tasks = []
+    nodes = ["PCFAPPL2", "PCFAPPL3", "PCFAPPL4"]
+    for i, n in enumerate(nodes):
+        req = BeamTaskRequest(
+            job_id=1,
+            plan_id=38,
+            beam_no=i + 1,
+            field_index=i,
+            total_fields=3,
+            plan_pencil_text=f"PENCIL_{i+1}",
+            delivered_protons=1.0e9,
+        )
+        t = pool.enqueue_task(
+            req=req,
+            ct_mhd_bytes=b"MHD",
+            ct_raw_bytes=b"RAW",
+            output_beam_path=Path(f"/tmp/beam_{i+1}.npz"),
+            target_node_id=n,
+            target_node_name=f"Worker-{n}",
+        )
+        tasks.append(t)
+
+    # Worker 2 polls first: should get task 2 (Beam 2), NOT Task 1!
+    polled_2 = pool.poll_task(node_id="PCFAPPL3", is_idle=True)
+    assert polled_2 is not None
+    assert polled_2["beam_no"] == 2
+    assert polled_2["task_id"] == tasks[1].task_id
+
+    # Worker 3 polls: should get task 3 (Beam 3)
+    polled_3 = pool.poll_task(node_id="PCFAPPL4", is_idle=True)
+    assert polled_3 is not None
+    assert polled_3["beam_no"] == 3
+    assert polled_3["task_id"] == tasks[2].task_id
+
+    # Worker 1 polls: should get task 1 (Beam 1)
+    polled_1 = pool.poll_task(node_id="PCFAPPL2", is_idle=True)
+    assert polled_1 is not None
+    assert polled_1["beam_no"] == 1
+    assert polled_1["task_id"] == tasks[0].task_id
+
+    # Extra idle poll when all assigned tasks are leased returns None
+    assert pool.poll_task(node_id="PCFAPPL2", is_idle=True) is None
+
+
+def test_heartbeat_links_and_converts_push_nodes_to_pull(tmp_path):
+    """Verify that an existing push node is linked and converted to pull when a worker heartbeats."""
+    from services.cluster.node_registry import NodeRegistry
+    from services.cluster.models import NodeRegistrationRequest, WorkerHeartbeatRequest
+
+    registry = NodeRegistry(storage_path=tmp_path / "nodes.json")
+    # Add node via UI (push mode)
+    push_node = registry.add_node(NodeRegistrationRequest(
+        name="PCFAPPL3",
+        url="http://172.20.155.57:8001",
+        enabled=True,
+    ))
+    assert push_node.mode == "push"
+
+    # Outbound pull worker heartbeats with matching hostname/name
+    hb = WorkerHeartbeatRequest(
+        node_id="PCFAPPL3",
+        name="PCFAPPL3",
+        hostname="PCFAPPL3.TNONC.com",
+        cores=16,
+        cpu_pct=10.0,
+        idle_seconds=600.0,
+        is_idle=True,
+        status="idle",
+        mode="pull",
+    )
+    linked = registry.record_heartbeat(hb)
+    assert linked.id == push_node.id or linked.name == "PCFAPPL3"
+    assert linked.mode == "pull"
+    assert linked.is_online is True
+    assert linked.is_idle is True
+
+    # Check available idle nodes
+    idle = registry.get_available_idle_nodes()
+    assert len(idle) == 1
+    assert idle[0].mode == "pull"
+
+
+
 
 

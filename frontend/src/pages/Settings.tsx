@@ -847,7 +847,10 @@ export function Settings() {
                             );
                           } else if (isOnline && node.status === "user_active") {
                             statusBadge = (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                              <span
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20 cursor-help"
+                                title="User is actively using keyboard/mouse on this machine. Set Required Idle Time to 0 min below or run 'run_worker.bat 0' on the PC to switch to dedicated compute mode."
+                              >
                                 <Laptop size={10} /> In Use (User Active)
                               </span>
                             );
@@ -974,7 +977,7 @@ export function Settings() {
                   </div>
                 </div>
                 <p className="text-[10px] text-clinical-muted mt-2">
-                  Tip: Copy the <code className="text-cyan-400 font-mono">cluster_worker/</code> folder to any computer, run <code className="text-cyan-400 font-mono">run_worker.bat</code> (Windows) or <code className="text-cyan-400 font-mono">run_worker.sh</code> (Linux), then enter its IP address above.
+                  Tip: Pull Mode is fully automatic! Copy the <code className="text-cyan-400 font-mono">cluster_worker/</code> folder to any computer, run <code className="text-cyan-400 font-mono">run_worker.bat 0</code> (Windows dedicated mode) or <code className="text-cyan-400 font-mono">./run_worker.sh</code>, and enter this server's URL. The worker will automatically register and appear in the table above without requiring firewall exceptions.
                 </p>
               </form>
 

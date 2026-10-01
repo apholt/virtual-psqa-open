@@ -107,17 +107,19 @@ def get_cpu_percent() -> float:
 
 def is_machine_idle() -> tuple[bool, str]:
     """Checks whether this machine is unoccupied and ready to compute."""
-    idle_sec = get_user_idle_seconds()
-    if _IDLE_MINUTES > 0:
-        required_sec = _IDLE_MINUTES * 60.0
-        if idle_sec < required_sec:
-            return False, f"User active ({int(idle_sec)}s idle < {int(required_sec)}s required)"
-
     cpu_pct = get_cpu_percent()
+    if _IDLE_MINUTES <= 0:
+        return True, f"Dedicated mode (always active, CPU {cpu_pct:.1f}%)"
+
+    idle_sec = get_user_idle_seconds()
+    required_sec = _IDLE_MINUTES * 60.0
+    if idle_sec < required_sec:
+        return False, f"User active ({int(idle_sec)}s idle < {int(required_sec)}s required)"
+
     if _MAX_CPU_PCT > 0 and cpu_pct > _MAX_CPU_PCT:
         return False, f"CPU busy ({cpu_pct:.1f}% > {_MAX_CPU_PCT:.1f}% limit)"
 
-    status_str = f"Idle ({int(idle_sec)}s user inactivity, CPU {cpu_pct:.1f}%)" if _IDLE_MINUTES > 0 else f"Dedicated mode (always active, CPU {cpu_pct:.1f}%)"
+    status_str = f"Idle ({int(idle_sec)}s user inactivity, CPU {cpu_pct:.1f}%)"
     return True, status_str
 
 
@@ -341,18 +343,24 @@ def run_pull_worker(
     logger.info("Outbound connection active. Zero incoming firewall rules required.")
     logger.info("=================================================================")
 
-    last_heartbeat = 0.0
+    import threading
 
-    while True:
-        try:
-            now = time.time()
-            idle_ok, idle_reason = is_machine_idle()
-            cores = os.cpu_count() or 1
-            cpu = get_cpu_percent()
-            idle_sec = get_user_idle_seconds()
+    def heartbeat_worker():
+        global _IDLE_MINUTES, _MAX_CPU_PCT
+        while True:
+            try:
+                idle_ok, _ = is_machine_idle()
+                cores = os.cpu_count() or 1
+                cpu = get_cpu_percent()
+                idle_sec = get_user_idle_seconds()
 
-            # 1. Heartbeat check-in every 5 seconds
-            if now - last_heartbeat >= 5.0:
+                if _CURRENT_TASK is not None:
+                    status = "busy"
+                    is_idle_val = False
+                else:
+                    status = "idle" if idle_ok else "user_active"
+                    is_idle_val = idle_ok
+
                 hb_payload = {
                     "node_id": node_id,
                     "name": worker_name,
@@ -361,31 +369,37 @@ def run_pull_worker(
                     "cores": cores,
                     "cpu_pct": round(cpu, 1),
                     "idle_seconds": round(idle_sec, 1),
-                    "is_idle": idle_ok,
-                    "status": "idle" if idle_ok else "user_active",
+                    "is_idle": is_idle_val,
+                    "status": status,
                     "mode": "pull",
                 }
-                try:
-                    with httpx.Client(timeout=5.0) as client:
-                        resp = client.post(f"{clean_server}/api/cluster/worker/heartbeat", json=hb_payload)
-                        if resp.status_code == 200:
-                            hb_data = resp.json()
-                            if not _IDLE_OVERRIDDEN_BY_CLI and "idle_minutes" in hb_data:
-                                s_idle = float(hb_data["idle_minutes"])
-                                if s_idle != _IDLE_MINUTES:
-                                    logger.info(f"Adopted server idle threshold: {s_idle} min")
-                                    _IDLE_MINUTES = s_idle
-                            if not _MAX_CPU_OVERRIDDEN_BY_CLI and "max_cpu_pct" in hb_data:
-                                s_cpu = float(hb_data["max_cpu_pct"])
-                                if s_cpu != _MAX_CPU_PCT:
-                                    logger.info(f"Adopted server max CPU limit: {s_cpu}%")
-                                    _MAX_CPU_PCT = s_cpu
-                    last_heartbeat = now
-                except Exception as hb_err:
-                    logger.warning(f"Could not reach server heartbeat at {clean_server}: {hb_err}")
+                with httpx.Client(timeout=5.0) as client:
+                    resp = client.post(f"{clean_server}/api/cluster/worker/heartbeat", json=hb_payload)
+                    if resp.status_code == 200:
+                        hb_data = resp.json()
+                        if not _IDLE_OVERRIDDEN_BY_CLI and "idle_minutes" in hb_data:
+                            s_idle = float(hb_data["idle_minutes"])
+                            if s_idle != _IDLE_MINUTES:
+                                logger.info(f"Adopted server idle threshold: {s_idle} min")
+                                _IDLE_MINUTES = s_idle
+                        if not _MAX_CPU_OVERRIDDEN_BY_CLI and "max_cpu_pct" in hb_data:
+                            s_cpu = float(hb_data["max_cpu_pct"])
+                            if s_cpu != _MAX_CPU_PCT:
+                                logger.info(f"Adopted server max CPU limit: {s_cpu}%")
+                                _MAX_CPU_PCT = s_cpu
+            except Exception as hb_err:
+                logger.debug(f"Heartbeat check failed: {hb_err}")
+            time.sleep(5.0)
 
-            # 2. If idle, poll for beam tasks
-            if idle_ok:
+    hb_thread = threading.Thread(target=heartbeat_worker, daemon=True)
+    hb_thread.start()
+
+    while True:
+        try:
+            idle_ok, idle_reason = is_machine_idle()
+
+            # Poll for beam tasks when idle and not busy
+            if idle_ok and _CURRENT_TASK is None:
                 poll_payload = {
                     "node_id": node_id,
                     "is_idle": True,
@@ -400,56 +414,61 @@ def run_pull_worker(
                                 task_id = task_meta["task_id"]
                                 beam_no = task_meta.get("beam_no")
                                 plan_id = task_meta.get("plan_id")
+                                task_label = f"Plan {plan_id} Beam {beam_no}"
+                                _CURRENT_TASK = {"task_label": task_label, "task_id": task_id, "start_time": time.time()}
                                 logger.info(f">>> [LEASED] Received Beam {beam_no} for Plan {plan_id} (Task {task_id[:8]}...)")
 
-                                # Download input bundle
-                                in_resp = client.get(
-                                    f"{clean_server}/api/cluster/worker/task/{task_id}/inputs",
-                                    timeout=120.0,
-                                )
-                                if in_resp.status_code != 200:
-                                    logger.error(f"Failed to download task inputs: {in_resp.text}")
-                                    continue
-
-                                # Execute simulation
-                                t_start = time.time()
                                 try:
-                                    dose_bytes, max_d, d_shape = execute_task_from_zip(
-                                        task_id, in_resp.content, task_meta
+                                    # Download input bundle
+                                    in_resp = client.get(
+                                        f"{clean_server}/api/cluster/worker/task/{task_id}/inputs",
+                                        timeout=120.0,
                                     )
-                                    duration = time.time() - t_start
+                                    if in_resp.status_code != 200:
+                                        logger.error(f"Failed to download task inputs: {in_resp.text}")
+                                        continue
 
-                                    # Upload result
-                                    files = {"dose_file": ("mc_dose.npz", dose_bytes, "application/octet-stream")}
-                                    form_data = {"max_dose": str(max_d), "duration_seconds": str(duration)}
-                                    up_resp = client.post(
-                                        f"{clean_server}/api/cluster/worker/task/{task_id}/result",
-                                        data=form_data,
-                                        files=files,
-                                        timeout=60.0,
-                                    )
-                                    if up_resp.status_code == 200:
-                                        logger.info(
-                                            f">>> [SUCCESS] Beam {beam_no} finished in {duration:.1f}s "
-                                            f"(max dose: {max_d:.4f} Gy). Uploaded to server!"
+                                    # Execute simulation
+                                    t_start = time.time()
+                                    try:
+                                        dose_bytes, max_d, d_shape = execute_task_from_zip(
+                                            task_id, in_resp.content, task_meta
                                         )
-                                    else:
-                                        logger.error(f"Failed to upload dose result: {up_resp.text}")
+                                        duration = time.time() - t_start
 
-                                except AbortCalculationException:
-                                    logger.warning(f"[ABORTED] User active on workstation. Aborted task {task_id[:8]}.")
-                                    client.post(
-                                        f"{clean_server}/api/cluster/worker/task/{task_id}/abort",
-                                        json={"task_id": task_id, "node_id": node_id, "reason": "user_active"},
-                                        timeout=5.0,
-                                    )
-                                except Exception as sim_err:
-                                    logger.exception(f"[ERROR] Simulation failed for task {task_id[:8]}: {sim_err}")
-                                    client.post(
-                                        f"{clean_server}/api/cluster/worker/task/{task_id}/abort",
-                                        json={"task_id": task_id, "node_id": node_id, "reason": str(sim_err)},
-                                        timeout=5.0,
-                                    )
+                                        # Upload result
+                                        files = {"dose_file": ("mc_dose.npz", dose_bytes, "application/octet-stream")}
+                                        form_data = {"max_dose": str(max_d), "duration_seconds": str(duration)}
+                                        up_resp = client.post(
+                                            f"{clean_server}/api/cluster/worker/task/{task_id}/result",
+                                            data=form_data,
+                                            files=files,
+                                            timeout=60.0,
+                                        )
+                                        if up_resp.status_code == 200:
+                                            logger.info(
+                                                f">>> [SUCCESS] Beam {beam_no} finished in {duration:.1f}s "
+                                                f"(max dose: {max_d:.4f} Gy). Uploaded to server!"
+                                            )
+                                        else:
+                                            logger.error(f"Failed to upload dose result: {up_resp.text}")
+
+                                    except AbortCalculationException:
+                                        logger.warning(f"[ABORTED] User active on workstation. Aborted task {task_id[:8]}.")
+                                        client.post(
+                                            f"{clean_server}/api/cluster/worker/task/{task_id}/abort",
+                                            json={"task_id": task_id, "node_id": node_id, "reason": "user_active"},
+                                            timeout=5.0,
+                                        )
+                                    except Exception as sim_err:
+                                        logger.exception(f"[ERROR] Simulation failed for task {task_id[:8]}: {sim_err}")
+                                        client.post(
+                                            f"{clean_server}/api/cluster/worker/task/{task_id}/abort",
+                                            json={"task_id": task_id, "node_id": node_id, "reason": str(sim_err)},
+                                            timeout=5.0,
+                                        )
+                                finally:
+                                    _CURRENT_TASK = None
                 except Exception as poll_err:
                     logger.debug(f"Poll check failed: {poll_err}")
 
