@@ -277,8 +277,10 @@ Dose_To_Water \t False
     raw_file = outputs_dir / headers.get("ElementDataFile", dose_mhd.stem + ".raw")
 
     raw_bytes = raw_file.read_bytes()
+    elem_type = headers.get("ElementType", "MET_FLOAT").strip().upper()
+    raw_dtype = np.float64 if elem_type == "MET_DOUBLE" else np.float32
     # MCsquare writes raw data in Fortran order with dim_size = [X, Y, Z]
-    dose_data = np.frombuffer(raw_bytes, dtype=np.float32).reshape(dim_size, order="F").transpose(1, 0, 2)
+    dose_data = np.frombuffer(raw_bytes, dtype=raw_dtype).astype(np.float32).reshape(dim_size, order="F").transpose(1, 0, 2)
     dose_data = np.flip(dose_data, 0)
     dose_data = np.flip(dose_data, 1)
 
