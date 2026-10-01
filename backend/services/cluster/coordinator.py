@@ -119,7 +119,7 @@ class ClusterCoordinator:
             "scanner": str(req.scanner),
         }
 
-        with httpx.Client(timeout=timeout_seconds) as client:
+        with httpx.Client(timeout=timeout_seconds, verify=False) as client:
             resp = client.post(f"{node.url}/simulate_beam", data=data, files=files)
             if resp.status_code != 200:
                 raise RuntimeError(

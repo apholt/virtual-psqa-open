@@ -358,46 +358,54 @@ def run_pull_worker(
 
     # Test initial connection synchronously so errors are immediately visible in the console
     logger.info(f"Connecting to Virtual PSQA Server at {clean_server}...")
-    try:
-        init_idle, _ = is_machine_idle()
-        init_payload = {
-            "node_id": node_id,
-            "name": worker_name,
-            "hostname": socket.gethostname(),
-            "os": f"{platform.system()} {platform.release()}",
-            "cores": os.cpu_count() or 1,
-            "cpu_pct": round(get_cpu_percent(), 1),
-            "idle_seconds": round(get_user_idle_seconds(), 1),
-            "is_idle": init_idle,
-            "status": "idle" if init_idle else "user_active",
-            "mode": "pull",
-        }
-        with httpx.Client(timeout=8.0) as client:
-            resp = client.post(f"{clean_server}/api/cluster/worker/heartbeat", json=init_payload)
-            if resp.status_code == 200:
-                hb_data = resp.json()
-                logger.info(
-                    f">>> [CONNECTED] Successfully registered with Virtual PSQA Server!\n"
-                    f"    Node ID: {node_id} | Status: {init_payload['status']} | Presence confirmed."
-                )
-            else:
-                logger.error(
-                    f"[ERROR] Server responded with HTTP {resp.status_code}: {resp.text}\n"
-                    f"Check that the server URL ({clean_server}) is correct."
-                )
-    except Exception as exc:
-        logger.error(
-            f"[CONNECTION ERROR] Failed to reach Virtual PSQA Server at {clean_server}!\n"
-            f"Details: {exc}\n\n"
-            f"Please check:\n"
-            f" 1. Is the port correct? (Current URL: {clean_server})\n"
-            f"    If Virtual PSQA is running on port 8003, ensure ':8003' is in the URL.\n"
-            f" 2. Is the server running?\n"
-            f" 3. Does Windows Firewall on the server allow inbound connections on that port?\n"
-            f" To change the saved server URL, run:\n"
-            f"    run_worker.bat <new_url>\n"
-            f" or edit cluster_worker/server_url.txt directly."
-        )
+    for attempt_url in ([clean_server, clean_server.replace("http://", "https://", 1)] if clean_server.startswith("http://") else [clean_server]):
+        try:
+            init_idle, _ = is_machine_idle()
+            init_payload = {
+                "node_id": node_id,
+                "name": worker_name,
+                "hostname": socket.gethostname(),
+                "os": f"{platform.system()} {platform.release()}",
+                "cores": os.cpu_count() or 1,
+                "cpu_pct": round(get_cpu_percent(), 1),
+                "idle_seconds": round(get_user_idle_seconds(), 1),
+                "is_idle": init_idle,
+                "status": "idle" if init_idle else "user_active",
+                "mode": "pull",
+            }
+            with httpx.Client(timeout=8.0, verify=False) as client:
+                resp = client.post(f"{attempt_url}/api/cluster/worker/heartbeat", json=init_payload)
+                if resp.status_code == 200:
+                    hb_data = resp.json()
+                    clean_server = attempt_url
+                    logger.info(
+                        f">>> [CONNECTED] Successfully registered with Virtual PSQA Server at {clean_server}!\n"
+                        f"    Node ID: {node_id} | Status: {init_payload['status']} | Presence confirmed."
+                    )
+                    break
+                else:
+                    logger.error(
+                        f"[ERROR] Server responded with HTTP {resp.status_code}: {resp.text}\n"
+                        f"Check that the server URL ({attempt_url}) is correct."
+                    )
+        except Exception as exc:
+            if attempt_url == clean_server and clean_server.startswith("http://"):
+                logger.info(f"HTTP connection to {attempt_url} failed ({exc}). Retrying with HTTPS...")
+                continue
+            logger.error(
+                f"[CONNECTION ERROR] Failed to reach Virtual PSQA Server at {clean_server}!\n"
+                f"Details: {exc}\n\n"
+                f"Please check:\n"
+                f" 1. Is the port correct? (Current URL: {clean_server})\n"
+                f" 2. Is the server running?\n"
+                f" 3. Is the firewall blocking the port on the server?\n"
+                f"    - On Linux server: run 'sudo ufw allow 8000/tcp' (or appropriate port)\n"
+                f"    - On Windows server: run 'New-NetFirewallRule -DisplayName \"Virtual PSQA\" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow'\n"
+                f" 4. If the server has SSL/HTTPS enabled, ensure the URL uses https://\n"
+                f" To change the saved server URL, run:\n"
+                f"    run_worker.bat <new_url>\n"
+                f" or edit cluster_worker/server_url.txt directly."
+            )
 
     import threading
 
@@ -429,7 +437,7 @@ def run_pull_worker(
                     "status": status,
                     "mode": "pull",
                 }
-                with httpx.Client(timeout=5.0) as client:
+                with httpx.Client(timeout=5.0, verify=False) as client:
                     resp = client.post(f"{clean_server}/api/cluster/worker/heartbeat", json=hb_payload)
                     if resp.status_code == 200:
                         hb_data = resp.json()
@@ -463,7 +471,7 @@ def run_pull_worker(
                     "is_idle": True,
                 }
                 try:
-                    with httpx.Client(timeout=10.0) as client:
+                    with httpx.Client(timeout=10.0, verify=False) as client:
                         resp = client.post(f"{clean_server}/api/cluster/worker/poll", json=poll_payload)
                         if resp.status_code == 200:
                             data = resp.json()

@@ -193,7 +193,7 @@ class NodeRegistry:
             return node
 
         try:
-            with httpx.Client(timeout=timeout_sec) as client:
+            with httpx.Client(timeout=timeout_sec, verify=False) as client:
                 resp = client.get(f"{node.url}/status")
                 if resp.status_code == 200:
                     data = resp.json()
