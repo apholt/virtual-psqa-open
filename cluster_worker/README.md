@@ -21,11 +21,18 @@ This package allows idle computers on the hospital / clinic network to assist wi
 ### Running the Worker (Recommended: PULL Mode)
 
 Simply double-click `run_worker.bat` on Windows (or `./run_worker.sh` on Linux):
-1. When prompted, enter your Virtual PSQA Server URL (e.g. `http://172.20.145.65:8000` or whatever address you type in your browser).
-2. The worker will automatically save it in `server_url.txt` and begin checking in with the server.
+1. When prompted, enter your Virtual PSQA Server URL (e.g. `http://172.20.145.65:8003` or whatever address you type in your browser).
+2. The worker will automatically save it in `cluster_worker/server_url.txt` and begin checking in with the server.
 3. In the Virtual PSQA web app under **Settings → Distributed MCsquare Compute Cluster**, your workstation will automatically appear with its live status, CPU cores, and idle state!
 
-### Manual Command Line Usage:
+### Command Line Options:
 ```cmd
-python vpsqa_worker.py --server-url http://172.20.145.65:8000 --mcsquare-dir C:\Path\To\MCsquare
+REM Launch with specific server URL and dedicated compute mode (0 idle minutes):
+run_worker.bat http://172.20.145.65:8003 0
+
+REM Reset saved server URL configuration:
+run_worker.bat reset
+
+REM Python direct usage:
+python vpsqa_worker.py --server-url http://172.20.145.65:8003 --mcsquare-dir C:\Path\To\MCsquare
 ```

@@ -6,7 +6,7 @@ Supports two operational modes:
 1. PULL Mode (Recommended for hospital networks):
    Connects OUTBOUND to the Virtual PSQA server. Bypasses hospital inbound firewalls.
    Usage:
-       python vpsqa_worker.py --server-url http://172.20.145.65:8000
+       python vpsqa_worker.py --server-url http://172.20.145.65:8003
 
 2. PUSH Mode (Legacy / flat LANs):
    Listens on port 8001 for inbound HTTP simulation requests.
@@ -327,9 +327,20 @@ def run_pull_worker(
     poll_interval: float = 3.0,
 ):
     global _IDLE_MINUTES, _MAX_CPU_PCT
-    clean_server = server_url.rstrip("/")
+    import urllib.parse
+
+    clean_server = server_url.strip().strip("'\"").rstrip("/")
     if not clean_server.startswith("http://") and not clean_server.startswith("https://"):
         clean_server = f"http://{clean_server}"
+
+    # Check if a port was specified
+    parsed = urllib.parse.urlsplit(clean_server)
+    if not parsed.port:
+        logger.warning(
+            f"[NOTE] No port specified in server URL '{clean_server}'. "
+            f"If your Virtual PSQA server runs on a specific port (e.g. :8003 or :8000), "
+            f"be sure to include it: {clean_server}:8003"
+        )
 
     worker_name = name or socket.gethostname()
     logger.info("=================================================================")
@@ -379,9 +390,13 @@ def run_pull_worker(
             f"[CONNECTION ERROR] Failed to reach Virtual PSQA Server at {clean_server}!\n"
             f"Details: {exc}\n\n"
             f"Please check:\n"
-            f" 1. Is the port included? (e.g. http://172.20.145.65:8000 instead of http://172.20.145.65)\n"
+            f" 1. Is the port correct? (Current URL: {clean_server})\n"
+            f"    If Virtual PSQA is running on port 8003, ensure ':8003' is in the URL.\n"
             f" 2. Is the server running?\n"
-            f" 3. Does Windows Firewall on the server allow inbound connections on that port?"
+            f" 3. Does Windows Firewall on the server allow inbound connections on that port?\n"
+            f" To change the saved server URL, run:\n"
+            f"    run_worker.bat <new_url>\n"
+            f" or edit cluster_worker/server_url.txt directly."
         )
 
     import threading
@@ -618,7 +633,7 @@ def main():
     global _MCSQUARE_DIR, _IDLE_MINUTES, _MAX_CPU_PCT, _IDLE_OVERRIDDEN_BY_CLI, _MAX_CPU_OVERRIDDEN_BY_CLI
 
     parser = argparse.ArgumentParser(description="VPSQA Standalone Distributed Worker")
-    parser.add_argument("--server-url", default=None, help="Virtual PSQA Server URL (e.g. http://172.20.145.65:8000). Runs in outbound PULL mode.")
+    parser.add_argument("--server-url", default=None, help="Virtual PSQA Server URL (e.g. http://172.20.145.65:8003). Runs in outbound PULL mode.")
     parser.add_argument("--node-id", default=None, help="Unique node ID (default: hostname)")
     parser.add_argument("--name", default=None, help="Display name for this workstation")
     parser.add_argument("--port", type=int, default=8001, help="Port to listen on in PUSH mode (default: 8001)")
