@@ -2,13 +2,31 @@ import os
 import numpy as np
 
 
+def _resolve_mcsquare_lib(candidate=None):
+    if candidate and os.path.isdir(candidate) and os.path.isdir(os.path.join(candidate, "BDL")):
+        return os.path.abspath(candidate)
+    env_dir = os.environ.get("MCSQUARE_HOME")
+    if env_dir and os.path.isdir(env_dir) and os.path.isdir(os.path.join(env_dir, "BDL")):
+        return os.path.abspath(env_dir)
+    for c in ["./MCsquare", "../MCsquare", "../../MCsquare"]:
+        abs_c = os.path.abspath(c)
+        if os.path.isdir(abs_c) and os.path.isdir(os.path.join(abs_c, "BDL")):
+            return abs_c
+    proc_dir = os.path.dirname(os.path.abspath(__file__))
+    for rel_c in [os.path.join(proc_dir, "..", "..", "MCsquare"), os.path.join(proc_dir, "..", "MCsquare")]:
+        abs_c = os.path.abspath(rel_c)
+        if os.path.isdir(abs_c) and os.path.isdir(os.path.join(abs_c, "BDL")):
+            return abs_c
+    return os.path.abspath(candidate) if candidate else os.path.abspath("./MCsquare")
+
+
 class MCsquare_BDL:
 
-  def __init__(self):
-    self.Path_MCsquareLib = os.path.abspath("./MCsquare")
+  def __init__(self, Path_MCsquareLib=None):
+    self.Path_MCsquareLib = _resolve_mcsquare_lib(Path_MCsquareLib)
     self.BDL_folder = os.path.join(self.Path_MCsquareLib, "BDL")
     self.list = self.get_list_BDL()
-    self.selected_BDL = self.list[0]
+    self.selected_BDL = self.list[0] if len(self.list) > 0 else ""
     self.isLoaded = 0
     self.NominalEnergy = []
     self.MeanEnergy = []
@@ -34,7 +52,8 @@ class MCsquare_BDL:
 
   def get_list_BDL(self):
     BDL_list = []
-    
+    if not os.path.isdir(self.BDL_folder):
+      return tuple(BDL_list)
     file_list = os.listdir(self.BDL_folder)
     
     for file_name in file_list:

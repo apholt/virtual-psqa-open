@@ -57,7 +57,7 @@ def _resolve_default_mcsquare_exe() -> str:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=os.environ.get("PSQA_ENV_FILE", ".env"),
+        env_file=os.environ.get("PSQA_ENV_FILE", str(Path(__file__).parent / ".env")),
         env_file_encoding="utf-8",
         extra="ignore",
     )

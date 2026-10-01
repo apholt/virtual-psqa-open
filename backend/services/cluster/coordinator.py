@@ -210,7 +210,7 @@ class ClusterCoordinator:
                 install_dir = Path(settings.MCSQUARE_HOME).resolve()
 
             # 1. Initialize MCsquare helper
-            mc2 = MCsquare()
+            mc2 = MCsquare(str(install_dir))
             mc2.Path_MCsquareLib = str(install_dir)
             mc2.BDL.Path_MCsquareLib = str(install_dir)
             mc2.BDL.BDL_folder = os.path.join(str(install_dir), "BDL")
@@ -221,7 +221,8 @@ class ClusterCoordinator:
 
             # 2. Load patient DICOM store
             patients = PatientList()
-            patients.list_dicom_files(str(plan.dicom_store_path), 1)
+            store_dir = str(Path(plan.dicom_store_path).resolve())
+            patients.list_dicom_files(store_dir, 1)
             if not patients.list:
                 raise ValueError(f"No patient DICOM files found in store: {plan.dicom_store_path}")
             patient = patients.list[0]
@@ -399,7 +400,7 @@ class ClusterCoordinator:
             logger.info(f"Computing {len(failed_tasks)} failed beam(s) on local host...")
             for req, out_path in failed_tasks:
                 success = self._compute_beam_locally(
-                    plan_id, req, work_dir, out_path, mc2, ct, sim_plan
+                    plan_id, req, work_dir, out_path, mc2, CT, sim_plan
                 )
                 if not success:
                     raise RuntimeError(f"Local fallback also failed for Beam {req.beam_no}.")

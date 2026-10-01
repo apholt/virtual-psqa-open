@@ -2,14 +2,32 @@ import os
 import re
 import numpy as np
 
+def _resolve_mcsquare_lib(candidate=None):
+    if candidate and os.path.isdir(candidate) and os.path.isdir(os.path.join(candidate, "Scanners")):
+        return os.path.abspath(candidate)
+    env_dir = os.environ.get("MCSQUARE_HOME")
+    if env_dir and os.path.isdir(env_dir) and os.path.isdir(os.path.join(env_dir, "Scanners")):
+        return os.path.abspath(env_dir)
+    for c in ["./MCsquare", "../MCsquare", "../../MCsquare"]:
+        abs_c = os.path.abspath(c)
+        if os.path.isdir(abs_c) and os.path.isdir(os.path.join(abs_c, "Scanners")):
+            return abs_c
+    proc_dir = os.path.dirname(os.path.abspath(__file__))
+    for rel_c in [os.path.join(proc_dir, "..", "..", "MCsquare"), os.path.join(proc_dir, "..", "MCsquare")]:
+        abs_c = os.path.abspath(rel_c)
+        if os.path.isdir(abs_c) and os.path.isdir(os.path.join(abs_c, "Scanners")):
+            return abs_c
+    return os.path.abspath(candidate) if candidate else os.path.abspath("./MCsquare")
+
+
 class MCsquare_CT_calibration:
 
-  def __init__(self):
-    self.Path_MCsquareLib = os.path.abspath("./MCsquare")
+  def __init__(self, Path_MCsquareLib=None):
+    self.Path_MCsquareLib = _resolve_mcsquare_lib(Path_MCsquareLib)
     self.Scanner_folder = os.path.join(self.Path_MCsquareLib, "Scanners")
     self.Materials_folder = os.path.join(self.Path_MCsquareLib, "Materials")
     self.list = self.get_list_Scanners()
-    self.selected_Scanner = self.list[0]
+    self.selected_Scanner = self.list[0] if len(self.list) > 0 else ""
     
     # calibration data
     self.HU = np.array([])
@@ -90,7 +108,8 @@ class MCsquare_CT_calibration:
     
   def get_list_Scanners(self):
     Scanner_list = []
-    
+    if not os.path.isdir(self.Scanner_folder):
+      return tuple(Scanner_list)
     dir_list = os.listdir(self.Scanner_folder)
     
     for dir_name in dir_list:

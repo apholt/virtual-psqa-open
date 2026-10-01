@@ -173,37 +173,35 @@ def execute_mc2_simulation(
     primaries = meta.get("primaries", 1_000_000)
     uncertainty = meta.get("uncertainty", 1.5)
 
-    config_template = f"""
-[Simulation]
-WorkDir = {work_path}
-Num_Threads = {max(1, (os.cpu_count() or 4) - 1)}
-Num_Primaries = {primaries}
-Stat_uncertainty = {uncertainty}
-RNG_Seed = 0
-E_Cut_Pro = 0.5
-D_Max = 0.2
-Epsilon_Max = 0.25
-Te_Min = 0.05
+    (work_path / "Outputs").mkdir(parents=True, exist_ok=True)
+    threads = max(1, (os.cpu_count() or 4) - 1)
+    config_content = f"""Num_Threads \t {threads}
+RNG_Seed \t 0
+Num_Primaries \t {primaries}
+Stat_uncertainty \t {uncertainty}
+E_Cut_Pro \t 0.5
+D_Max \t 0.2
+Epsilon_Max \t 0.25
+Te_Min \t 0.05
 
-[Files]
-CT_File = CT.mhd
-ScannerDirectory = {scanner_dir}
-HU_Density_Conversion_File = {scanner_dir / 'HU_Density_Conversion.txt'}
-HU_Material_Conversion_File = {scanner_dir / 'HU_Material_Conversion.txt'}
-BDL_Machine_Parameter_File = {bdl_file}
-BDL_Plan_File = PlanPencil.txt
+CT_File \t CT.mhd
+ScannerDirectory \t {scanner_dir}
+HU_Density_Conversion_File \t {scanner_dir / 'HU_Density_Conversion.txt'}
+HU_Material_Conversion_File \t {scanner_dir / 'HU_Material_Conversion.txt'}
+BDL_Machine_Parameter_File \t {bdl_file}
+BDL_Plan_File \t PlanPencil.txt
 
-[Physics]
-Simulate_Nuclear_Interactions = 1
-Simulate_Secondary_Protons = 1
-Simulate_Secondary_Deuterons = 1
-Simulate_Secondary_Alphas = 1
+Simulate_Nuclear_Interactions \t True
+Simulate_Secondary_Protons \t True
+Simulate_Secondary_Deuterons \t True
+Simulate_Secondary_Alphas \t True
 
-[Outputs]
-Export_Beam_dose = 1
-Dose_To_Water = 0
+Output_Directory \t Outputs
+Dose_MHD_Output \t True
+Export_Beam_dose \t True
+Dose_To_Water \t False
 """
-    (work_path / "config.txt").write_text(config_template.strip(), encoding="utf-8")
+    (work_path / "config.txt").write_text(config_content.strip() + "\n", encoding="utf-8")
 
     env = os.environ.copy()
     env["MCsquare_Materials_Dir"] = str(_MCSQUARE_DIR / "Materials")
@@ -248,11 +246,13 @@ Dose_To_Water = 0
 
         time.sleep(0.5)
 
-    ret = _RUNNING_PROC.wait()
+    stdout_output, _ = _RUNNING_PROC.communicate()
+    ret = _RUNNING_PROC.returncode
     _RUNNING_PROC = None
 
     if ret != 0:
-        raise RuntimeError(f"MCsquare exited with code {ret}")
+        logger.error(f"MCsquare failed (code {ret}):\n{stdout_output}")
+        raise RuntimeError(f"MCsquare exited with code {ret}: {stdout_output[-300:] if stdout_output else ''}")
 
     # Locate output dose MHD
     outputs_dir = work_path / "Outputs"
@@ -277,16 +277,19 @@ Dose_To_Water = 0
     raw_file = outputs_dir / headers.get("ElementDataFile", dose_mhd.stem + ".raw")
 
     raw_bytes = raw_file.read_bytes()
-    dose_data = np.frombuffer(raw_bytes, dtype=np.float32).reshape(dim_size[::-1])
+    # MCsquare writes raw data in Fortran order with dim_size = [X, Y, Z]
+    dose_data = np.frombuffer(raw_bytes, dtype=np.float32).reshape(dim_size, order="F").transpose(1, 0, 2)
+    dose_data = np.flip(dose_data, 0)
+    dose_data = np.flip(dose_data, 1)
 
-    # Apply scaling
+    # Apply scaling (1.602176e-16 converts eV/g to Gy)
     protons = float(meta.get("delivered_protons", 1.0))
     scale = float(meta.get("dose_scaling", 0.9))
     rbe_factor = float(meta.get("rbe", 1.10))
-    scaled_dose = dose_data * (protons * scale * rbe_factor)
+    scaled_dose = dose_data * (1.602176e-16 * protons * scale * rbe_factor)
 
-    # Transpose to VPSQA convention (Z, Y, X)
-    dose_z_y_x = np.transpose(scaled_dose, (2, 1, 0)).astype("<f4")
+    # Transpose (Y, X, Z) to VPSQA convention (Z, Y, X)
+    dose_z_y_x = np.transpose(scaled_dose, (2, 0, 1)).astype("<f4")
     max_dose = float(dose_z_y_x.max())
     dose_shape = list(dose_z_y_x.shape)
 
@@ -436,6 +439,7 @@ def run_pull_worker(
                     "is_idle": is_idle_val,
                     "status": status,
                     "mode": "pull",
+                    "active_task": _CURRENT_TASK.get("task_label") if _CURRENT_TASK else None,
                 }
                 with httpx.Client(timeout=5.0, verify=False) as client:
                     resp = client.post(f"{clean_server}/api/cluster/worker/heartbeat", json=hb_payload)

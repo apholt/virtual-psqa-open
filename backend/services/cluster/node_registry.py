@@ -22,7 +22,8 @@ from services.cluster.models import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_STORAGE_FILE = Path(settings.RESULTS_PATH).parent / "cluster_nodes.json"
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+_DEFAULT_STORAGE_FILE = _BACKEND_DIR / "data" / "cluster_nodes.json"
 
 
 class NodeRegistry:

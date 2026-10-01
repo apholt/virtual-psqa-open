@@ -45,6 +45,27 @@ def list_nodes():
     return registry.refresh_all()
 
 
+@router.get("/tasks")
+def list_pool_tasks():
+    """Returns all active, leased, and pending tasks in the cluster pool."""
+    pool = get_task_pool()
+    with pool._lock:
+        return [
+            {
+                "task_id": t.task_id,
+                "plan_id": t.req.plan_id,
+                "beam_no": t.req.beam_no,
+                "status": t.status,
+                "leased_by": t.leased_by,
+                "target_node_id": t.target_node_id,
+                "created_at": t.created_at,
+                "lease_time": t.lease_time,
+                "error": t.error,
+            }
+            for t in pool._tasks.values()
+        ]
+
+
 @router.post("/nodes", response_model=ClusterNode)
 def add_node(payload: NodeRegistrationRequest):
     """Registers a new worker node in the cluster."""

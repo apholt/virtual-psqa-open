@@ -14,12 +14,12 @@ from Process.RTdose import *
 
 class MCsquare:
 
-  def __init__(self):
-    self.Path_MCsquareLib = os.path.abspath("./MCsquare")
-    self.WorkDir = os.path.join(os.path.expanduser('~'), "Work");
+  def __init__(self, Path_MCsquareLib=None):
+    self.BDL = MCsquare_BDL(Path_MCsquareLib)
+    self.Path_MCsquareLib = self.BDL.Path_MCsquareLib
+    self.Scanner = MCsquare_CT_calibration(self.Path_MCsquareLib)
+    self.WorkDir = os.path.join(os.path.expanduser('~'), "Work")
     self.DoseName = "MCsquare_dose"
-    self.BDL = MCsquare_BDL()
-    self.Scanner = MCsquare_CT_calibration()
     self.NumProtons = 1e7
     self.MaxUncertainty = 2.0
     self.dose2water = 1
