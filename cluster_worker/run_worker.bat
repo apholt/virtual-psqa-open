@@ -29,6 +29,7 @@ set ARG3=%~3
 if /i "%ARG1%"=="reset" goto reset_config
 if /i "%ARG1%"=="clear" goto reset_config
 if /i "%ARG1%"=="--reset" goto reset_config
+if /i "%ARG1%"=="push" goto push_mode
 
 REM Detect if ARG1 is a server URL (contains :// or starts with digits for an IP)
 echo %ARG1% | findstr /i "://" >nul 2>&1
@@ -78,8 +79,9 @@ if not "%SERVER_URL%"=="" echo Current Server URL: %SERVER_URL%
 if not "%SERVER_URL%"=="" echo Config File Path:   %~dp0server_url.txt
 echo.
 if not "%SERVER_URL%"=="" set /p USER_INPUT="Server URL [Press Enter to keep '%SERVER_URL%', or type new URL]: "
-if "%SERVER_URL%"=="" set /p USER_INPUT="Server URL [e.g. http://172.20.145.65:8003, or Enter for push mode]: "
+if "%SERVER_URL%"=="" set /p USER_INPUT="Server URL [e.g. http://172.20.145.65:8003, or type 'push' for port 8001]: "
 if "%USER_INPUT%"=="" goto launch
+if /i "%USER_INPUT%"=="push" set SERVER_URL=& goto push_mode
 
 echo %USER_INPUT% | findstr /i "://" >nul 2>&1
 if %errorlevel% neq 0 set USER_INPUT=http://%USER_INPUT%

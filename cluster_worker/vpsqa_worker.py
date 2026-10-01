@@ -326,7 +326,7 @@ def run_pull_worker(
     name: Optional[str] = None,
     poll_interval: float = 3.0,
 ):
-    global _IDLE_MINUTES, _MAX_CPU_PCT
+    global _IDLE_MINUTES, _MAX_CPU_PCT, _CURRENT_TASK
     import urllib.parse
 
     clean_server = server_url.strip().strip("'\"").rstrip("/")
@@ -402,7 +402,7 @@ def run_pull_worker(
     import threading
 
     def heartbeat_worker():
-        global _IDLE_MINUTES, _MAX_CPU_PCT
+        global _IDLE_MINUTES, _MAX_CPU_PCT, _CURRENT_TASK
         while True:
             try:
                 idle_ok, _ = is_machine_idle()
@@ -640,7 +640,7 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="Host IP to bind in PUSH mode (default: 0.0.0.0)")
     parser.add_argument("--mcsquare-dir", default="./MCsquare", help="Path to MCsquare directory containing BDL/ and executable")
     parser.add_argument("--idle-minutes", type=float, default=None, help="Inactivity minutes before accepting tasks (0 = dedicated mode)")
-    parser.add_argument("--max-cpu-pct", type=float, default=None, help="Max background CPU % before considered busy")
+    parser.add_argument("--max-cpu-pct", type=float, default=None, help="Max background CPU percent before considered busy")
     args = parser.parse_args()
 
     _MCSQUARE_DIR = Path(args.mcsquare_dir).resolve()
