@@ -123,24 +123,69 @@ def is_machine_idle() -> tuple[bool, str]:
     return True, status_str
 
 
+def resolve_mcsquare_dir(candidate: Optional[Any] = None) -> Path:
+    """Finds the MCsquare root directory containing BDL/, Scanners/, or executables."""
+    search_dirs = []
+    if candidate:
+        search_dirs.append(Path(candidate))
+    env_home = os.environ.get("MCSQUARE_HOME")
+    if env_home:
+        search_dirs.append(Path(env_home))
+
+    script_dir = Path(__file__).resolve().parent
+    search_dirs.extend([
+        Path("./MCsquare"),
+        Path("../MCsquare"),
+        script_dir.parent / "MCsquare",
+        script_dir / "MCsquare",
+        Path.cwd().parent / "MCsquare",
+        Path.cwd() / "MCsquare",
+        Path("C:/virtual-psqa-open/MCsquare"),
+    ])
+
+    for d in search_dirs:
+        try:
+            d_res = d.resolve()
+            if d_res.is_dir() and ((d_res / "BDL").is_dir() or (d_res / "Scanners").is_dir()):
+                return d_res
+        except Exception:
+            pass
+
+    return Path(candidate or "./MCsquare").resolve()
+
+
 def find_mcsquare_binary(install_dir: Path) -> Path:
-    """Finds a compatible MCsquare executable in the install directory."""
+    """Finds a compatible MCsquare executable in the install directory or parent directories."""
     is_win = platform.system().lower() == "windows"
     candidates = (
         ["MCsquare_win_avx2.exe", "MCsquare_win.exe", "MCsquare_win_avx.exe", "MCsquare_win_sse4.exe"]
         if is_win
         else ["MCsquare_linux_avx2", "MCsquare_linux", "MCsquare_linux_avx", "MCsquare_linux_sse4", "MCsquare_linux_avx512"]
     )
-    for c in candidates:
-        p = install_dir / c
-        if p.is_file() and p.exists():
-            if not is_win:
-                try:
-                    p.chmod(p.stat().st_mode | 0o755)
-                except Exception:
-                    pass
-            return p.resolve()
-    raise FileNotFoundError(f"No MCsquare executable found in {install_dir}")
+    resolved_dir = resolve_mcsquare_dir(install_dir)
+    search_dirs = [install_dir, resolved_dir]
+    script_dir = Path(__file__).resolve().parent
+    search_dirs.extend([
+        script_dir.parent / "MCsquare",
+        script_dir / "MCsquare",
+        Path("../MCsquare").resolve(),
+        Path("C:/virtual-psqa-open/MCsquare"),
+    ])
+
+    for d in search_dirs:
+        if not d.is_dir():
+            continue
+        for c in candidates:
+            p = d / c
+            if p.is_file() and p.exists():
+                if not is_win:
+                    try:
+                        p.chmod(p.stat().st_mode | 0o755)
+                    except Exception:
+                        pass
+                return p.resolve()
+    searched_str = ", ".join(str(d) for d in search_dirs)
+    raise FileNotFoundError(f"No MCsquare executable found in {install_dir} (searched: {searched_str})")
 
 
 def execute_mc2_simulation(
@@ -153,9 +198,12 @@ def execute_mc2_simulation(
     Monitors user activity and aborts if user becomes active on this workstation.
     Returns (npz_dose_bytes, max_dose, dose_shape).
     """
-    global _RUNNING_PROC
+    global _RUNNING_PROC, _MCSQUARE_DIR
 
+    _MCSQUARE_DIR = resolve_mcsquare_dir(_MCSQUARE_DIR)
     exe = find_mcsquare_binary(_MCSQUARE_DIR)
+    if exe.parent != _MCSQUARE_DIR and ((exe.parent / "BDL").is_dir() or (exe.parent / "Scanners").is_dir()):
+        _MCSQUARE_DIR = exe.parent
     scanner = meta.get("scanner", "default")
     scanner_dir = _MCSQUARE_DIR / "Scanners" / scanner
     if not scanner_dir.exists():
@@ -656,8 +704,7 @@ def main():
     parser.add_argument("--idle-minutes", type=float, default=None, help="Inactivity minutes before accepting tasks (0 = dedicated mode)")
     parser.add_argument("--max-cpu-pct", type=float, default=None, help="Max background CPU percent before considered busy")
     args = parser.parse_args()
-
-    _MCSQUARE_DIR = Path(args.mcsquare_dir).resolve()
+    _MCSQUARE_DIR = resolve_mcsquare_dir(args.mcsquare_dir)
     if args.idle_minutes is not None:
         _IDLE_MINUTES = args.idle_minutes
         _IDLE_OVERRIDDEN_BY_CLI = True

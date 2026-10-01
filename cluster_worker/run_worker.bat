@@ -5,7 +5,9 @@ echo   Virtual PSQA - Distributed Monte Carlo Worker
 echo ========================================================
 echo.
 
-set MCSQUARE_DIR=..\MCsquare
+set MCSQUARE_DIR=%~dp0..\MCsquare
+if not exist "%MCSQUARE_DIR%" set MCSQUARE_DIR=..\MCsquare
+if not exist "%MCSQUARE_DIR%" set MCSQUARE_DIR=%~dp0MCsquare
 if not exist "%MCSQUARE_DIR%" set MCSQUARE_DIR=.\MCsquare
 
 echo Checking dependencies...
