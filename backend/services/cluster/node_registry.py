@@ -69,8 +69,20 @@ class NodeRegistry:
     def get_node(self, node_id: str) -> Optional[ClusterNode]:
         return self._nodes.get(node_id)
 
+    def _normalize_url(self, raw_url: str) -> str:
+        url = raw_url.strip().rstrip("/")
+        if url.startswith("pull://"):
+            return url
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = f"http://{url}"
+        import urllib.parse
+        parsed = urllib.parse.urlsplit(url)
+        if not parsed.port:
+            url = f"{url}:8001"
+        return url
+
     def add_node(self, req: NodeRegistrationRequest) -> ClusterNode:
-        clean_url = req.url.rstrip("/")
+        clean_url = self._normalize_url(req.url)
         # Check for existing by URL
         for existing in self._nodes.values():
             if existing.url == clean_url:
@@ -192,11 +204,13 @@ class NodeRegistry:
             node.status = "offline"
             return node
 
+        target_url = self._normalize_url(node.url)
         try:
             with httpx.Client(timeout=timeout_sec, verify=False) as client:
-                resp = client.get(f"{node.url}/status")
+                resp = client.get(f"{target_url}/status")
                 if resp.status_code == 200:
                     data = resp.json()
+                    node.url = target_url
                     node.is_online = True
                     node.status = data.get("status", "idle")
                     node.is_idle = (node.status == "idle")
